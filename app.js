@@ -1,1716 +1,1917 @@
-/**
- * RealPhone POS — Punto de Venta Celulares y Tecnología
- * app.js — Lógica principal con atajos de teclado e inventario Excel
- */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, onSnapshot, doc, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
 
-(function () {
+const firebaseConfig = {
+    apiKey: "AIzaSyAziX2ZYthQ6jMN9t5KoEk1qb88ZT29OMU",
+    authDomain: "realphone-tickets.firebaseapp.com",
+    projectId: "realphone-tickets",
+    storageBucket: "realphone-tickets.firebasestorage.app",
+    messagingSenderId: "461224250452",
+    appId: "1:461224250452:web:9d2ed52a0e880c3e45f1c1"
+};
 
-    // ==================== DATOS INICIALES ====================
-    const defaultUsers = [
-        { id: 'u1', username: 'admin',   password: '1234', role: 'admin',   fullName: 'Administrador Principal',  branch: 'principal', active: true },
-        { id: 'u2', username: 'gerente', password: '1234', role: 'gerente', fullName: 'Gerente de Sucursal',      branch: 'sucursal1', active: true },
-        { id: 'u3', username: 'cajero',  password: '1234', role: 'cajero',  fullName: 'Cajero Demo',              branch: 'principal', active: true }
-    ];
+const app = initializeApp(firebaseConfig);
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({tabManager: persistentMultipleTabManager()})
+});
 
-    const defaultProducts = [
-        { id: 'p1', sku: 'FUNDA-001', name: 'Funda Genérica para Celular',      category: 'fundas', cost: 30,  price: 99,   stock: 50 },
-        { id: 'p2', sku: 'MICA-001',  name: 'Mica Normal Cristal Templado',     category: 'micas',  cost: 15,  price: 49,   stock: 100 }
-    ];
+const STORAGE_STORE = 'realphone_current_store';
 
-    const STORE_ADDRESSES = {
-        "Matriz": "Lázaro Cárdenas 179 Col. Centro",
-        "Sunny": "53 Príncipe Tacámba Col. Centro",
-        "Hospital": "99 Álvaro Obregón Col. Centro",
-        "David": "Av. Madero Oriente Col. Centro",
-        "Portal": "34 Portal Nicolás de Regulés Col. Centro",
-        "Coppel": "486 Lic. Isidro Favela Col. Los Pinos"
-    };
+// ==================== STORE ADDRESSES ====================
+const STORE_ADDRESSES = {
+    "Matriz": "Lázaro Cárdenas 179 Col. Centro",
+    "Sunny": "53 Príncipe Tacámba Col. Centro",
+    "Hospital": "99 Álvaro Obregón Col. Centro",
+    "David": "Av. Madero Oriente Col. Centro",
+    "Portal": "34 Portal Nicolás de Regulés Col. Centro",
+    "Coppel": "486 Lic. Isidro Favela Col. Los Pinos"
+};
 
-    // ==================== ESTADO GLOBAL ====================
-    let users         = [];
-    let products      = [];
-    let salesHistory  = [];
-    let categories    = []; // { id, name }
-    let currentUser   = null;
-    let currentUser2  = null;
-    let currentBranch = localStorage.getItem('realphone_current_store') || '';
-    let ticketItems   = [];
-    let ticketCounter = 1;
-    let activeCategory = 'todas';
-    let pendingImportData = [];
-    let selectedExportType = 'full';
+// ==================== CLOUD / DB ABSTRACTION ====================
+const DB = {
+    getStore: () => localStorage.getItem(STORAGE_STORE) || '',
+    setStore: (store) => localStorage.setItem(STORAGE_STORE, store),
+    removeStore: () => localStorage.removeItem(STORAGE_STORE),
+    clearTickets: async () => {
+        // Para borrar todo, en Firestore tendríamos que iterar cada documento
+        // Por seguridad, esto ahora solo borra la tienda local.
+        alert("La función de borrar base de datos completa se deshabilitó temporalmente por seguridad en la nube.");
+    }
+};
 
-    const defaultCategories = [
-        { id: 'fundas',  name: '🛡️ Fundas' },
-        { id: 'micas',   name: '📱 Micas'  },
-        { id: 'otros',   name: '📦 Otros'  }
-    ];
+let users = [];
+let facturas = [];
+let reparaciones = [];
+let apartados = [];
+let encargos = [];
+let currentStore = DB.getStore();
+let currentUser1 = null;
+let currentUser2 = null;
 
-    // ==================== PERSISTENCIA ====================
-    const DATA_VERSION = '3.0'; // Cambiar para forzar reset de inventario
+// ==================== FIREBASE REAL-TIME LISTENERS ====================
+let dataLoaded = { users: false, facturas: false, reparaciones: false, apartados: false, encargos: false };
 
-    function loadData() {
-        try {
-            const savedVersion = localStorage.getItem('realphone_version');
-            if (savedVersion !== DATA_VERSION) {
-                console.log('Datos actualizados a versión ' + DATA_VERSION + '. Reseteando inventario...');
-                users        = structuredClone(defaultUsers);
-                products     = structuredClone(defaultProducts);
-                salesHistory = [];
-                categories   = structuredClone(defaultCategories);
-                localStorage.setItem('realphone_version', DATA_VERSION);
-                saveData();
-                return;
-            }
-            users        = JSON.parse(localStorage.getItem('realphone_users'))      || structuredClone(defaultUsers);
-            products     = JSON.parse(localStorage.getItem('realphone_products'))   || structuredClone(defaultProducts);
-            salesHistory = JSON.parse(localStorage.getItem('realphone_sales'))      || [];
-            categories   = JSON.parse(localStorage.getItem('realphone_categories')) || structuredClone(defaultCategories);
-        } catch (e) {
-            console.error('Error cargando datos:', e);
-            users        = structuredClone(defaultUsers);
-            products     = structuredClone(defaultProducts);
-            salesHistory = [];
-            categories   = structuredClone(defaultCategories);
-        }
+function checkAllDataLoaded() {
+    if (dataLoaded.users && dataLoaded.facturas && dataLoaded.reparaciones && dataLoaded.apartados && dataLoaded.encargos) {
+        initApp();
+    }
+}
+
+onSnapshot(collection(db, "users"), (snapshot) => {
+    users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    localStorage.setItem('shared_firebase_users', JSON.stringify(users));
+    
+    // Si no hay usuarios en la nube, creamos los por defecto
+    if (users.length === 0) {
+        const defaultUsers = [
+            { id: '0', username: 'USUARIO', password: 'KJFHSKLJKFDKSLSLFKJSDLKFJSDFLKKSDJFJBANKBBSDFK', role: 'admin' },
+        ];
+        defaultUsers.forEach(u => setDoc(doc(db, "users", u.id), u));
     }
 
-    function saveData() {
-        try {
-            localStorage.setItem('realphone_users',       JSON.stringify(users));
-            localStorage.setItem('realphone_products',    JSON.stringify(products));
-            localStorage.setItem('realphone_sales',       JSON.stringify(salesHistory));
-            localStorage.setItem('realphone_categories',  JSON.stringify(categories));
-        } catch (e) {
-            console.error('Error guardando datos:', e);
-        }
-    }
+    // Leer quién está logueado desde el POS
+    const posUser1 = localStorage.getItem('realphone_currentUser1');
+    const posUser2 = localStorage.getItem('realphone_currentUser2');
 
-    // ==================== UTILIDADES ====================
-    function formatMoney(amount) {
-        return '$' + Number(amount).toFixed(2) + ' MXN';
-    }
-
-    function generateId() {
-        return 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
-    }
-
-    // ==================== TOAST NOTIFICATIONS ====================
-    function showToast(message, type = 'info') {
-        const container = document.getElementById('toastContainer');
-        const icons = {
-            success: 'fas fa-check-circle',
-            error:   'fas fa-exclamation-circle',
-            warning: 'fas fa-exclamation-triangle',
-            info:    'fas fa-info-circle'
-        };
-
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        toast.innerHTML = `<i class="${icons[type] || icons.info}"></i><span>${message}</span>`;
-        container.appendChild(toast);
-
-        setTimeout(() => {
-            toast.classList.add('toast-out');
-            setTimeout(() => toast.remove(), 300);
-        }, 3500);
-    }
-
-    // ==================== REFERENCIAS AL DOM ====================
-    const setupOverlay       = document.getElementById('setupOverlay');
-    const setupStoreSelect   = document.getElementById('setupStoreSelect');
-    const btnSaveSetup       = document.getElementById('btnSaveSetup');
-    const loginStoreNameDisplay = document.getElementById('loginStoreNameDisplay');
-
-    const loginOverlay       = document.getElementById('loginOverlay');
-    const posContainer       = document.getElementById('posContainer');
-    const loginError         = document.getElementById('loginError');
-    const productListEl      = document.getElementById('productList');
-    const ticketBody         = document.getElementById('ticketBody');
-    const totalDisplay       = document.getElementById('totalDisplay');
-    const paymentInput       = document.getElementById('paymentInput');
-    const paymentDisplay     = document.getElementById('paymentDisplay');
-    const changeDisplay      = document.getElementById('changeDisplay');
-    const ticketNumberEl     = document.getElementById('ticketNumber');
-    const searchInput        = document.getElementById('searchInput');
-    const currentUserDisplay = document.getElementById('currentUserDisplay');
-    const inventoryModal     = document.getElementById('inventoryModal');
-    const shortcutPanel      = document.getElementById('shortcutPanel');
-
-    // ==================== CONFIGURACIÓN DE TIENDA ====================
-    if (!currentBranch) {
-        if (setupOverlay) setupOverlay.style.display = 'flex';
-        if (loginOverlay) loginOverlay.style.display = 'none';
+    if (posUser1) {
+        const parsed1 = JSON.parse(posUser1);
+        currentUser1 = users.find(u => u.id === parsed1.id) || parsed1;
     } else {
-        if (setupOverlay) setupOverlay.style.display = 'none';
-        if (loginOverlay) loginOverlay.style.display = 'flex';
-        if (loginStoreNameDisplay) loginStoreNameDisplay.textContent = 'Sucursal ' + currentBranch;
+        currentUser1 = null;
     }
 
-    if (btnSaveSetup) {
-        btnSaveSetup.addEventListener('click', () => {
-            const val = setupStoreSelect.value;
-            if (!val) {
-                showToast('Selecciona una tienda primero', 'warning');
-                return;
-            }
-            currentBranch = val;
-            localStorage.setItem('realphone_current_store', val);
-            
-            if (loginStoreNameDisplay) loginStoreNameDisplay.textContent = 'Sucursal ' + currentBranch;
-            if (setupOverlay) setupOverlay.style.display = 'none';
-            if (loginOverlay) loginOverlay.style.display = 'flex';
-        });
-    }
-
-    // ==================== AUTENTICACIÓN ====================
-    function updateSaleCashierSelect() {
-        const select = document.getElementById('saleCashierSelect');
-        if (!select) return;
-        select.innerHTML = '<option value="">¿Quién atiende esta venta?</option>';
-        if (currentUser) {
-            select.innerHTML += `<option value="${currentUser.username || currentUser.fullName}">${currentUser.username || currentUser.fullName}</option>`;
-        }
-        if (currentUser2) {
-            select.innerHTML += `<option value="${currentUser2.username || currentUser2.fullName}">${currentUser2.username || currentUser2.fullName}</option>`;
-        }
-        
-        if (currentUser2) {
-            select.style.display = 'block';
-            select.value = currentUser.username || currentUser.fullName; // Default
-        } else {
-            select.style.display = 'none';
-            if (currentUser) select.value = currentUser.username || currentUser.fullName;
-        }
-    }
-
-    document.getElementById('loginBtn').addEventListener('click', function () {
-        const username = document.getElementById('loginUser').value.trim();
-        const password = document.getElementById('loginPass').value.trim();
-
-        if (!username || !password) {
-            loginError.textContent = '⚠️ Ingresa usuario y contraseña';
-            return;
-        }
-
-        // Usar usuarios de Firebase si están disponibles
-        let authUsers = users;
-        try {
-            const firebaseUsers = localStorage.getItem('shared_firebase_users');
-            if (firebaseUsers) {
-                const parsed = JSON.parse(firebaseUsers);
-                if (Array.isArray(parsed) && parsed.length > 0) authUsers = parsed;
-            }
-        } catch(e) {}
-
-        let user = authUsers.find(
-            u => (u.username || '').toLowerCase() === username.toLowerCase() && String(u.password) === String(password)
-        );
-
-        // Fallback a locales si no está en Firebase (por si intentan usar admin/1234)
-        if (!user && authUsers !== users) {
-            user = users.find(
-                u => (u.username || '').toLowerCase() === username.toLowerCase() && String(u.password) === String(password)
-            );
-        }
-
-        if (!user) {
-            loginError.textContent = '❌ Usuario o contraseña incorrectos';
-            return;
-        }
-
-        if (user.active === false) {
-            loginError.textContent = '⚠️ Usuario desactivado';
-            return;
-        }
-
-        // Login exitoso
-        currentUser   = user;
-        
-        // Registrar en localStorage para que el Gestor lo lea
-        localStorage.setItem('realphone_currentUser1', JSON.stringify(currentUser));
-        
-        // Control del branchSelect
-        const branchSelect = document.getElementById('branchSelect');
-        if (branchSelect) {
-            if (user.role === 'admin' || user.role === 'tester') {
-                branchSelect.style.display = 'inline-block';
-            } else {
-                branchSelect.style.display = 'none';
-            }
-        }
-
-        currentUserDisplay.innerHTML =
-            '<i class="fas fa-user-circle"></i> <span>' + (user.username || user.fullName) + (user.role === 'admin' ? ' (Admin)' : '') + '</span>';
-
-        loginOverlay.classList.add('hidden');
-        posContainer.style.display = 'flex';
-        loginError.textContent = '';
-
-        updateSaleCashierSelect();
-        showToast('Bienvenido, ' + (user.username || user.fullName), 'success');
-        renderProducts();
-        updateTicketDisplay();
-    });
-
-    // Navegar con Enter en el login
-    document.getElementById('loginUser').addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') document.getElementById('loginPass').focus();
-    });
-    document.getElementById('loginPass').addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') document.getElementById('loginBtn').click();
-    });
-
-    // Cerrar sesión
-    document.getElementById('btnLogout').addEventListener('click', function () {
-        if (!confirm('¿Cerrar sesión actual?')) return;
-        currentUser = null;
+    if (posUser2) {
+        const parsed2 = JSON.parse(posUser2);
+        currentUser2 = users.find(u => u.id === parsed2.id) || parsed2;
+    } else {
         currentUser2 = null;
-        ticketItems = [];
-        localStorage.removeItem('realphone_currentUser1');
-        localStorage.removeItem('realphone_currentUser2');
+    }
+
+    if (currentUser1) applyRolesAndUI(); // Refrescar UI
+
+    if (!dataLoaded.users) { dataLoaded.users = true; checkAllDataLoaded(); }
+});
+
+// Listener para cuando el POS cambia los usuarios sin recargar
+window.addEventListener('storage', (e) => {
+    if (e.key === 'realphone_currentUser1' || e.key === 'realphone_currentUser2') {
+        const posUser1 = localStorage.getItem('realphone_currentUser1');
+        const posUser2 = localStorage.getItem('realphone_currentUser2');
         
-        loginOverlay.classList.remove('hidden');
-        posContainer.style.display = 'none';
-        document.getElementById('loginUser').value = '';
-        document.getElementById('loginPass').value = '';
-        document.getElementById('coworkerDisplay').style.display = 'none';
-        document.getElementById('btnAddCoworkerPOS').style.display = 'inline-block';
-        showToast('Sesión cerrada', 'info');
-    });
+        if (posUser1) {
+            const parsed1 = JSON.parse(posUser1);
+            currentUser1 = users.find(u => u.id === parsed1.id) || parsed1;
+        } else {
+            currentUser1 = null;
+        }
 
-    // ==================== DOBLE SESIÓN (Coworker) ====================
-    const btnAddCoworkerPOS = document.getElementById('btnAddCoworkerPOS');
-    const addCoworkerModalPOS = document.getElementById('addCoworkerModalPOS');
-    const btnCancelCoworkerPOS = document.getElementById('btnCancelCoworkerPOS');
-    const btnLoginCoworkerPOS = document.getElementById('btnLoginCoworkerPOS');
-    const coworkerDisplay = document.getElementById('coworkerDisplay');
-    const btnRemoveCoworkerPOS = document.getElementById('btnRemoveCoworkerPOS');
-    const coworkerErrorPOS = document.getElementById('coworkerErrorPOS');
-
-    if (btnAddCoworkerPOS) {
-        btnAddCoworkerPOS.addEventListener('click', () => {
-            addCoworkerModalPOS.style.display = 'flex';
-        });
-    }
-    if (btnCancelCoworkerPOS) {
-        btnCancelCoworkerPOS.addEventListener('click', () => {
-            addCoworkerModalPOS.style.display = 'none';
-        });
-    }
-    if (btnLoginCoworkerPOS) {
-        btnLoginCoworkerPOS.addEventListener('click', () => {
-            const u = document.getElementById('coworkerUserPOS').value.trim();
-            const p = document.getElementById('coworkerPassPOS').value.trim();
-
-            let authUsers = users;
-            try {
-                const firebaseUsers = localStorage.getItem('shared_firebase_users');
-                if (firebaseUsers) {
-                    const parsed = JSON.parse(firebaseUsers);
-                    if (Array.isArray(parsed) && parsed.length > 0) authUsers = parsed;
-                }
-            } catch(e) {}
-
-            let user = authUsers.find(
-                uObj => (uObj.username || '').toLowerCase() === u.toLowerCase() && String(uObj.password) === String(p)
-            );
-
-            // Fallback
-            if (!user && authUsers !== users) {
-                user = users.find(
-                    uObj => (uObj.username || '').toLowerCase() === u.toLowerCase() && String(uObj.password) === String(p)
-                );
-            }
-
-            if (!user) {
-                coworkerErrorPOS.style.display = 'block';
-                return;
-            }
-
-            if (currentUser && user.id === currentUser.id) {
-                coworkerErrorPOS.textContent = 'Este usuario ya está iniciado.';
-                coworkerErrorPOS.style.display = 'block';
-                return;
-            }
-
-            currentUser2 = user;
-            localStorage.setItem('realphone_currentUser2', JSON.stringify(currentUser2));
-            
-            coworkerDisplay.style.display = 'inline-flex';
-            coworkerDisplay.querySelector('span').textContent = user.username || user.fullName;
-            btnAddCoworkerPOS.style.display = 'none';
-            addCoworkerModalPOS.style.display = 'none';
-            coworkerErrorPOS.style.display = 'none';
-            
-            document.getElementById('coworkerUserPOS').value = '';
-            document.getElementById('coworkerPassPOS').value = '';
-            updateSaleCashierSelect();
-            showToast('Segundo empleado iniciado', 'success');
-        });
-    }
-    if (btnRemoveCoworkerPOS) {
-        btnRemoveCoworkerPOS.addEventListener('click', () => {
+        if (posUser2) {
+            const parsed2 = JSON.parse(posUser2);
+            currentUser2 = users.find(u => u.id === parsed2.id) || parsed2;
+        } else {
             currentUser2 = null;
-            localStorage.removeItem('realphone_currentUser2');
-            coworkerDisplay.style.display = 'none';
-            btnAddCoworkerPOS.style.display = 'inline-block';
-            updateSaleCashierSelect();
-        });
+        }
+        
+        if (currentUser1) {
+            applyRolesAndUI();
+            if (loginScreen) loginScreen.classList.add('hidden');
+        } else {
+            if (loginScreen) loginScreen.classList.remove('hidden');
+        }
+    }
+});
+
+onSnapshot(collection(db, "facturas"), (snapshot) => {
+    facturas = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    // Ordenar de más reciente a más antiguo por timestamp
+    facturas.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+    if (currentUser1) {
+        updateStatsFacturas();
+        renderFacturas();
     }
 
-    // Cambio de sucursal (solo admin)
-    document.getElementById('branchSelect').addEventListener('change', function (e) {
-        if (currentUser && currentUser.role === 'admin') {
-            currentBranch = e.target.value;
-            showToast('Sucursal cambiada: ' + currentBranch, 'info');
-        } else if (currentUser) {
-            e.target.value = currentBranch;
-            showToast('Solo administradores pueden cambiar de sucursal', 'warning');
+    if (!dataLoaded.facturas) { dataLoaded.facturas = true; checkAllDataLoaded(); }
+});
+
+onSnapshot(collection(db, "reparaciones"), (snapshot) => {
+    reparaciones = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    reparaciones.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+    if (currentUser1) {
+        updateStatsReparaciones();
+        renderReparaciones();
+    }
+
+    if (!dataLoaded.reparaciones) { dataLoaded.reparaciones = true; checkAllDataLoaded(); }
+});
+
+onSnapshot(collection(db, "apartados"), (snapshot) => {
+    apartados = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    apartados.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (currentUser1) { updateStatsApartado(); renderApartados(); }
+    if (!dataLoaded.apartados) { dataLoaded.apartados = true; checkAllDataLoaded(); }
+});
+
+onSnapshot(collection(db, "encargos"), (snapshot) => {
+    encargos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    encargos.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (currentUser1) { updateStatsEncargos(); renderEncargos(); }
+    if (!dataLoaded.encargos) { dataLoaded.encargos = true; checkAllDataLoaded(); }
+});
+
+// ==================== DOM ELEMENTS ====================
+// Modals & Auth
+const setupModal = document.getElementById('setupModal');
+const setupStoreSelect = document.getElementById('setupStoreSelect');
+const btnSaveSetup = document.getElementById('btnSaveSetup');
+
+const loginScreen = document.getElementById('loginScreen');
+const loginForm = document.getElementById('loginForm');
+const loginError = document.getElementById('loginError');
+
+const activeUsersBar = document.getElementById('activeUsersBar');
+const activeUsersContainer = document.getElementById('activeUsersContainer');
+const btnAddCoworker = document.getElementById('btnAddCoworker');
+const btnLogout = document.getElementById('btnLogout');
+
+const addCoworkerModal = document.getElementById('addCoworkerModal');
+const addCoworkerForm = document.getElementById('addCoworkerForm');
+const coworkerError = document.getElementById('coworkerError');
+const btnCancelCoworker = document.getElementById('btnCancelCoworker');
+
+// Generales
+const headerStoreName = document.getElementById('headerStoreName');
+const tabAdminBtn = document.getElementById('tabAdminBtn');
+const tabBtns = document.querySelectorAll('.tab-btn');
+const tabContents = document.querySelectorAll('.tab-content');
+
+// Change Password
+const btnChangePassword = document.getElementById('btnChangePassword');
+const changePasswordModal = document.getElementById('changePasswordModal');
+const changePasswordForm = document.getElementById('changePasswordForm');
+const passwordChangeError = document.getElementById('passwordChangeError');
+const btnCancelChangePassword = document.getElementById('btnCancelChangePassword');
+
+// Forms & Inputs
+const atendioFactura = document.getElementById('atendioFactura');
+const atendioReparacion = document.getElementById('atendioReparacion');
+const atendioApartado = document.getElementById('atendioApartado');
+const atendioEncargo = document.getElementById('atendioEncargo');
+const tiendaFactura = document.getElementById('tiendaFactura');
+const tiendaReparacion = document.getElementById('tiendaReparacion');
+const tiendaApartado = document.getElementById('tiendaApartado');
+const tiendaEncargo = document.getElementById('tiendaEncargo');
+
+// Facturas Elements
+const countPendingFacturas = document.getElementById('countPendingFacturas');
+const countDoneFacturas = document.getElementById('countDoneFacturas');
+const countCancelledFacturas = document.getElementById('countCancelledFacturas');
+const formFactura = document.getElementById('ticketFormFactura');
+const containerFacturas = document.getElementById('ticketsContainerFacturas');
+const btnDeleteOldFacturas = document.getElementById('btnDeleteOldFacturas');
+
+// Reparaciones Elements
+const countPendingReparaciones = document.getElementById('countPendingReparaciones');
+const countDoneReparaciones = document.getElementById('countDoneReparaciones');
+const countCancelledReparaciones = document.getElementById('countCancelledReparaciones');
+const formReparacion = document.getElementById('ticketFormReparacion');
+const containerReparaciones = document.getElementById('ticketsContainerReparaciones');
+const filterReparaciones = document.getElementById('filterStatusReparaciones');
+const btnClearReparaciones = document.getElementById('btnClearCompletedReparaciones');
+const searchByFacturas = document.getElementById('searchByFacturas');
+const searchInputFacturas = document.getElementById('searchInputFacturas');
+const searchByReparaciones = document.getElementById('searchByReparaciones');
+const searchInputReparaciones = document.getElementById('searchInputReparaciones');
+const searchStoreFacturas = document.getElementById('searchStoreFacturas');
+const searchStoreReparaciones = document.getElementById('searchStoreReparaciones');
+
+// Apartado Elements
+const containerApartado = document.getElementById('ticketsContainerApartado');
+const formApartado = document.getElementById('ticketFormApartado');
+const filterApartado = document.getElementById('filterStatusApartado');
+const btnClearApartado = document.getElementById('btnClearCompletedApartado');
+const searchInputApartado = document.getElementById('searchInputApartado');
+const searchStoreApartado = document.getElementById('searchStoreApartado');
+
+// Encargos Elements
+const containerEncargos = document.getElementById('ticketsContainerEncargos');
+const formEncargo = document.getElementById('ticketFormEncargo');
+const filterEncargos = document.getElementById('filterStatusEncargos');
+const btnClearEncargos = document.getElementById('btnClearCompletedEncargos');
+const searchInputEncargos = document.getElementById('searchInputEncargos');
+const searchStoreEncargos = document.getElementById('searchStoreEncargos');
+
+// Confirm Ticket Modal
+const confirmTicketModal = document.getElementById('confirmTicketModal');
+const confirmTicketBody = document.getElementById('confirmTicketBody');
+const btnCancelConfirmTicket = document.getElementById('btnCancelConfirmTicket');
+const btnAcceptConfirmTicket = document.getElementById('btnAcceptConfirmTicket');
+
+// Payment Confirm Modal
+const paymentConfirmModal = document.getElementById('paymentConfirmModal');
+const paymentConfirmBody = document.getElementById('paymentConfirmBody');
+const btnCancelPaymentConfirm = document.getElementById('btnCancelPaymentConfirm');
+const btnAcceptPaymentConfirm = document.getElementById('btnAcceptPaymentConfirm');
+
+// Phone toggle for Reparaciones
+const clientPhoneReparacionInput = document.getElementById('clientPhoneReparacion');
+const noPhoneReparacionCheckbox = document.getElementById('noPhoneReparacion');
+if (noPhoneReparacionCheckbox) {
+    noPhoneReparacionCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            clientPhoneReparacionInput.value = '';
+            clientPhoneReparacionInput.disabled = true;
+            clientPhoneReparacionInput.placeholder = 'Sin número';
+        } else {
+            clientPhoneReparacionInput.disabled = false;
+            clientPhoneReparacionInput.placeholder = 'Ej: 555 123 4567';
         }
     });
+}
 
-    // ==================== CATEGORÍAS: TABS DINÁMICOS ====================
-    function renderCategoryTabs() {
-        const tabsEl = document.getElementById('categoryTabs');
-        if (!tabsEl) return;
-        tabsEl.innerHTML = `<button class="category-tab ${activeCategory === 'todas' ? 'active' : ''}" data-cat="todas">📦 Todas</button>` +
-            categories.map(c =>
-                `<button class="category-tab ${activeCategory === c.id ? 'active' : ''}" data-cat="${c.id}">${c.name}</button>`
-            ).join('');
-        // Re-bind click listeners
-        tabsEl.querySelectorAll('.category-tab').forEach(btn => {
-            btn.addEventListener('click', () => {
-                tabsEl.querySelectorAll('.category-tab').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                activeCategory = btn.dataset.cat;
-                renderProducts(document.getElementById('searchInput').value);
+// Admin Elements
+const usersContainer = document.getElementById('usersContainer');
+const btnResetStore = document.getElementById('btnResetStore');
+const btnResetDB = document.getElementById('btnResetDB');
+const adminCurrentStore = document.getElementById('adminCurrentStore');
+
+
+// ==================== INITIALIZATION ====================
+function initApp() {
+    if (!currentStore) {
+        setupModal.classList.remove('hidden');
+    } else {
+        // En lugar de mostrar login, verificamos si el POS ya inició sesión
+        const posUser1 = localStorage.getItem('realphone_currentUser1');
+        if (posUser1) {
+            loginScreen.classList.add('hidden');
+            const parsed1 = JSON.parse(posUser1);
+            currentUser1 = users.find(u => u.id === parsed1.id) || parsed1;
+            
+            const posUser2 = localStorage.getItem('realphone_currentUser2');
+            if (posUser2) {
+                const parsed2 = JSON.parse(posUser2);
+                currentUser2 = users.find(u => u.id === parsed2.id) || parsed2;
+            }
+            applyRolesAndUI();
+        } else {
+            // Mostrar pantalla de espera (o login bloqueado)
+            loginScreen.classList.remove('hidden');
+            const subtitle = loginScreen.querySelector('.subtitle');
+            if (subtitle) subtitle.textContent = "Por favor, inicia sesión en el Punto de Venta.";
+            if (loginForm) loginForm.style.display = 'none';
+        }
+    }
+}
+
+btnSaveSetup.addEventListener('click', () => {
+    if (setupStoreSelect.value) {
+        currentStore = setupStoreSelect.value;
+        DB.setStore(currentStore);
+        setupModal.classList.add('hidden');
+        initApp();
+    } else {
+        alert("Selecciona una tienda primero.");
+    }
+});
+
+// Login UI is disabled, it is handled by the POS.
+// The form listeners are removed or left dormant.
+
+// ==================== CHANGE PASSWORD ====================
+btnChangePassword.addEventListener('click', () => {
+    changePasswordModal.classList.remove('hidden');
+});
+
+btnCancelChangePassword.addEventListener('click', () => {
+    changePasswordModal.classList.add('hidden');
+    changePasswordForm.reset();
+    passwordChangeError.style.display = 'none';
+});
+
+changePasswordForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const currentPass = document.getElementById('currentPassword').value;
+    const newPass = document.getElementById('newPassword').value;
+
+    if (currentUser1.password === currentPass) {
+        currentUser1.password = newPass;
+        setDoc(doc(db, "users", currentUser1.id), currentUser1);
+
+        changePasswordModal.classList.add('hidden');
+        changePasswordForm.reset();
+        passwordChangeError.style.display = 'none';
+        alert('Contraseña actualizada correctamente.');
+    } else {
+        passwordChangeError.textContent = 'La contraseña actual es incorrecta.';
+        passwordChangeError.style.display = 'block';
+    }
+});
+
+// ==================== ROLES & UI SETUP ====================
+function isAdmin() {
+    return (currentUser1 && (currentUser1.role === 'admin' || currentUser1.role === 'tester')) || (currentUser2 && (currentUser2.role === 'admin' || currentUser2.role === 'tester'));
+}
+
+function isTester() {
+    return (currentUser1 && currentUser1.role === 'tester') || (currentUser2 && currentUser2.role === 'tester');
+}
+
+function applyRolesAndUI() {
+    headerStoreName.textContent = `- ${currentStore}`;
+    adminCurrentStore.textContent = currentStore;
+
+    // Active Users Bar UI
+    activeUsersBar.style.display = 'flex';
+    activeUsersContainer.innerHTML = '';
+
+    const chip1 = document.createElement('div');
+    chip1.className = 'user-chip';
+    chip1.innerHTML = `<i class="fa-solid fa-user"></i> ${currentUser1.username} ${currentUser1.role === 'admin' ? '<span class="admin-badge">Admin</span>' : ''}`;
+    activeUsersContainer.appendChild(chip1);
+
+    if (currentUser2) {
+        const chip2 = document.createElement('div');
+        chip2.className = 'user-chip';
+        // En el Gestor ya no se cierra sesión individualmente, se hace desde el POS
+        chip2.innerHTML = `<i class="fa-solid fa-user"></i> ${currentUser2.username} ${currentUser2.role === 'admin' ? '<span class="admin-badge">Admin</span>' : ''}`;
+        activeUsersContainer.appendChild(chip2);
+        btnAddCoworker.style.display = 'none'; // Max 2
+    } else {
+        btnAddCoworker.style.display = 'none'; // Se añade desde el POS
+    }
+
+    // Atendio Selects Configuration
+    let atendioOptions = `<option value="">Seleccione personal</option>`;
+    atendioOptions += `<option value="${currentUser1.username}">${currentUser1.username}</option>`;
+    if (currentUser2) {
+        atendioOptions += `<option value="${currentUser2.username}">${currentUser2.username}</option>`;
+    }
+    atendioFactura.innerHTML = atendioOptions;
+    atendioReparacion.innerHTML = atendioOptions;
+    atendioApartado.innerHTML = atendioOptions;
+    atendioEncargo.innerHTML = atendioOptions;
+
+    // Auto-select if only 1 user
+    if (!currentUser2) {
+        atendioFactura.value = currentUser1.username;
+        atendioReparacion.value = currentUser1.username;
+        atendioApartado.value = currentUser1.username;
+        atendioEncargo.value = currentUser1.username;
+    }
+
+    // Permissions logic
+    if (isAdmin()) {
+        tabAdminBtn.classList.remove('hidden');
+        btnDeleteOldFacturas.style.display = 'inline-flex';
+        btnClearReparaciones.style.display = 'inline-flex';
+        if (btnClearApartado) btnClearApartado.style.display = 'inline-flex';
+        if (btnClearEncargos) btnClearEncargos.style.display = 'inline-flex';
+        btnChangePassword.style.display = 'inline-flex';
+
+        document.querySelectorAll('.admin-search-option').forEach(el => {
+            el.style.display = 'flex';
+        });
+
+        const btnNotify = document.getElementById('btnNotifyPayment');
+        if (btnNotify) btnNotify.style.display = 'none';
+
+        tiendaFactura.disabled = false;
+        tiendaReparacion.disabled = false;
+        if (tiendaApartado) tiendaApartado.disabled = false;
+        if (tiendaEncargo) tiendaEncargo.disabled = false;
+
+        renderAdminUsers();
+    } else {
+        tabAdminBtn.classList.add('hidden');
+        btnDeleteOldFacturas.style.display = 'none';
+        btnClearReparaciones.style.display = 'none';
+        if (btnClearApartado) btnClearApartado.style.display = 'none';
+        if (btnClearEncargos) btnClearEncargos.style.display = 'none';
+        btnChangePassword.style.display = 'none';
+
+        document.querySelectorAll('.admin-search-option').forEach(el => el.style.display = 'none');
+        if (searchStoreFacturas) searchStoreFacturas.value = '';
+        if (searchStoreReparaciones) searchStoreReparaciones.value = '';
+
+        const btnNotify = document.getElementById('btnNotifyPayment');
+        if (btnNotify) btnNotify.style.display = 'inline-flex';
+
+        tiendaFactura.value = currentStore;
+        tiendaFactura.disabled = true;
+        tiendaReparacion.value = currentStore;
+        tiendaReparacion.disabled = true;
+        if (tiendaApartado) { tiendaApartado.value = currentStore; tiendaApartado.disabled = true; }
+        if (tiendaEncargo) { tiendaEncargo.value = currentStore; tiendaEncargo.disabled = true; }
+
+        if (tabAdminBtn.classList.contains('active')) {
+            document.querySelector('[data-tab="tab-facturas"]').click();
+        }
+    }
+
+    const testerBtn = document.getElementById('tabTesterBtn');
+    if (isTester()) {
+        if (testerBtn) testerBtn.classList.remove('hidden');
+    } else {
+        if (testerBtn) {
+            testerBtn.classList.add('hidden');
+            if (testerBtn.classList.contains('active')) {
+                document.querySelector('[data-tab="tab-facturas"]').click();
+            }
+        }
+    }
+
+    updateStatsFacturas();
+    updateStatsReparaciones();
+    updateStatsApartado();
+    updateStatsEncargos();
+    renderFacturas();
+    renderReparaciones();
+    renderApartados();
+    renderEncargos();
+}
+
+
+// ==================== TABS ====================
+tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        tabBtns.forEach(b => b.classList.remove('active'));
+        tabContents.forEach(c => {
+            c.classList.remove('active');
+            c.style.display = ''; // Limpiar cualquier display inline que pueda dar problema
+        });
+
+        btn.classList.add('active');
+        const content = document.getElementById(btn.dataset.tab);
+        if (content) content.classList.add('active');
+    });
+});
+
+// ==================== TICKETS LOGIC ====================
+function getDisplayFacturas() {
+    let list = isAdmin() ? facturas : facturas.filter(t => t.tienda === currentStore);
+    if (isAdmin() && searchStoreFacturas) {
+        const storeVal = searchStoreFacturas.value;
+        if (storeVal) list = list.filter(t => t.tienda === storeVal);
+    }
+    if (searchInputFacturas) {
+        let searchVal = searchInputFacturas.value.toLowerCase().trim();
+        if (searchVal) {
+            list = list.filter(t => {
+                // Buscar por nombre de cliente
+                const clientStr = (t.client || '').toLowerCase();
+                if (clientStr.includes(searchVal)) return true;
+
+                // Buscar por fecha (coincidencia directa)
+                const dateStr = (t.createdAt || t.date || '').toLowerCase();
+                if (dateStr.includes(searchVal)) return true;
+
+                // Buscar por fecha en formato corto (d/m o d/m/yyyy)
+                let [d, m, y] = searchVal.split('/');
+                if (d && m) {
+                    let shortD = parseInt(d, 10).toString();
+                    let shortM = parseInt(m, 10).toString();
+                    let shortSearch = `${shortD}/${shortM}`;
+                    if (y) shortSearch += `/${y}`;
+                    if (dateStr.includes(shortSearch)) return true;
+                }
+                return false;
             });
-        });
-    }
-
-    // ==================== CATEGORÍAS: SELECT EN FORMULARIO ====================
-    function refreshCategorySelect() {
-        const sel = document.getElementById('addCategory');
-        if (!sel) return;
-        const currentVal = sel.value;
-        sel.innerHTML = categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
-        if (currentVal) sel.value = currentVal;
-    }
-
-    // ==================== CATEGORÍAS: LISTA EN MODAL ====================
-    function renderCategoriesList() {
-        const container = document.getElementById('categoriesListContainer');
-        if (!container) return;
-        if (categories.length === 0) {
-            container.innerHTML = '<p style="color:var(--text-secondary); text-align:center; padding:2rem;">No hay categorías. ¡Agrega la primera!</p>';
-            return;
         }
-        container.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
-            <thead><tr style="border-bottom:2px solid var(--border); color:var(--text-secondary); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.5px;">
-                <th style="text-align:left; padding:10px 12px;">Clave</th>
-                <th style="text-align:left; padding:10px 12px;">Nombre visible</th>
-                <th style="text-align:right; padding:10px 12px;">Productos</th>
-                <th style="padding:10px 12px;"></th>
-            </tr></thead>
-            <tbody>${categories.map(c => {
-                const count = products.filter(p => p.category === c.id).length;
-                const isDefault = ['fundas','micas','otros'].includes(c.id);
-                return `<tr style="border-bottom:1px solid var(--border);">
-                    <td style="padding:10px 12px; font-family:var(--font-mono); color:var(--accent);">${c.id}</td>
-                    <td style="padding:10px 12px; font-weight:600;">${c.name}</td>
-                    <td style="padding:10px 12px; text-align:right; color:var(--text-secondary);">${count}</td>
-                    <td style="padding:10px 12px; text-align:right;">
-                        ${!isDefault ? `<button onclick="window.deleteCategory('${c.id}')" style="background:var(--danger-light); border:1px solid var(--danger); color:var(--danger); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:0.78rem; font-family:inherit;" title="Eliminar categoría"><i class='fas fa-trash'></i></button>` : '<span style="font-size:0.72rem; color:var(--text-secondary);">predeterminada</span>'}
-                    </td>
-                </tr>`;
-            }).join('')}</tbody>
-        </table>`;
     }
+    return list;
+}
 
-    window.deleteCategory = function(id) {
-        const count = products.filter(p => p.category === id).length;
-        const cat = categories.find(c => c.id === id);
-        if (!cat) return;
-        const msg = count > 0
-            ? `¿Eliminar la categoría "${cat.name}"? Los ${count} productos en esta categoría quedarán en categoría "otros".`
-            : `¿Eliminar la categoría "${cat.name}"?`;
-        if (!confirm(msg)) return;
-        // Mover productos a 'otros'
-        products.forEach(p => { if (p.category === id) p.category = 'otros'; });
-        categories = categories.filter(c => c.id !== id);
-        saveData();
-        renderCategoryTabs();
-        refreshCategorySelect();
-        renderCategoriesList();
-        showToast('Categoría eliminada', 'info');
+function getDisplayReparaciones() {
+    let list = isAdmin() ? reparaciones : reparaciones.filter(t => t.tienda === currentStore);
+    const filter = filterReparaciones.value;
+    if (filter !== 'Todos') list = list.filter(t => t.status === filter);
+    if (isAdmin() && searchStoreReparaciones) {
+        const storeVal = searchStoreReparaciones.value;
+        if (storeVal) list = list.filter(t => t.tienda === storeVal);
+    }
+    if (searchInputReparaciones) {
+        let searchVal = searchInputReparaciones.value.toLowerCase().trim();
+        if (searchVal) {
+            list = list.filter(t => {
+                // Buscar por nombre de cliente
+                const clientStr = (t.client || '').toLowerCase();
+                if (clientStr.includes(searchVal)) return true;
+
+                // Buscar por fecha (coincidencia directa)
+                const dateStr = (t.createdAt || t.date || '').toLowerCase();
+                if (dateStr.includes(searchVal)) return true;
+
+                // Buscar por fecha en formato corto
+                let [d, m, y] = searchVal.split('/');
+                if (d && m) {
+                    let shortD = parseInt(d, 10).toString();
+                    let shortM = parseInt(m, 10).toString();
+                    let shortSearch = `${shortD}/${shortM}`;
+                    if (y) shortSearch += `/${y}`;
+                    if (dateStr.includes(shortSearch)) return true;
+                }
+                return false;
+            });
+        }
+    }
+    return list;
+}
+
+// Funciones saveFacturas y saveReparaciones eliminadas porque Firebase actualiza automáticamente
+// a través de onSnapshot. Solo enviaremos los datos con setDoc.
+
+// ==================== CONFIRM TICKET MODAL ====================
+let _pendingTicketData = null; // datos del ticket en espera de confirmación
+let _pendingTicketType = null; // 'factura' | 'reparacion'
+let _pendingTicketForm = null; // ref al form para resetear
+
+function showConfirmModal(fields, onAccept) {
+    confirmTicketBody.innerHTML = fields.map(f => `
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:0.6rem 0.75rem; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;">
+            <span style="color:var(--text-muted); font-size:0.9rem;">${f.label}</span>
+            <strong style="color:var(--primary-dark); font-size:0.95rem;">${f.value}</strong>
+        </div>
+    `).join('');
+    confirmTicketModal.classList.remove('hidden');
+    btnAcceptConfirmTicket.onclick = () => {
+        confirmTicketModal.classList.add('hidden');
+        onAccept();
     };
+}
 
-    // ==================== RENDERIZADO DE PRODUCTOS ====================
-    window.deleteProduct = function(e, id) {
-        e.stopPropagation();
-        if (!confirm('¿Seguro que deseas eliminar este producto permanentemente del inventario?')) return;
-        products = products.filter(p => p.id !== id);
-        saveData();
-        renderProducts(document.getElementById('searchInput') ? document.getElementById('searchInput').value : '');
-        showToast('Producto eliminado', 'info');
-    };
+btnCancelConfirmTicket.addEventListener('click', () => {
+    confirmTicketModal.classList.add('hidden');
+    _pendingTicketData = null;
+});
 
-    function renderProducts(filterText = '') {
-        if (!productListEl) return;
+formFactura.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const clientName = document.getElementById('clientNameFactura').value;
+    const phone = document.getElementById('clientPhone').value;
+    const totalCost = parseFloat(document.getElementById('costTotalFactura').value).toFixed(2);
+    const tienda = isAdmin() ? document.getElementById('tiendaFactura').value : currentStore;
+    const atendio = document.getElementById('atendioFactura').value;
 
-        const filtered = products.filter(p => {
-            const matchCat   = activeCategory === 'todas' || p.category === activeCategory;
-            const searchLower = filterText.toLowerCase();
-            const matchSearch = !filterText ||
-                p.name.toLowerCase().includes(searchLower) ||
-                p.sku.toLowerCase().includes(searchLower);
-            return matchCat && matchSearch;
-        });
+    const fields = [
+        { label: '👤 Nombre del cliente', value: clientName },
+        { label: '📞 Teléfono', value: phone || 'No proporcionado' },
+        { label: '💰 Costo total', value: `$${totalCost}` },
+    ];
 
-        if (filtered.length === 0) {
-            productListEl.innerHTML =
-                '<div style="text-align:center; color:var(--text-secondary); padding:2rem; font-weight:500;">No se encontraron productos</div>';
-            return;
+    showConfirmModal(fields, () => {
+        let newTicket = {
+            id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+            type: 'Factura',
+            client: clientName,
+            phone: phone,
+            tienda: tienda,
+            atendio: atendio,
+            totalCost: totalCost,
+            advanceCost: totalCost,
+            status: 'Realizado',
+            createdAt: new Date().toLocaleString(),
+            timestamp: Date.now(),
+            completedAt: new Date().toLocaleString(),
+            paymentConfirmed: false
+        };
+        setDoc(doc(db, "facturas", newTicket.id), newTicket);
+        e.target.reset();
+        applyRolesAndUI();
+    });
+});
+
+formReparacion.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const clientName = document.getElementById('clientNameReparacion').value;
+    const noPhone = document.getElementById('noPhoneReparacion').checked;
+    const phone = noPhone ? 'Sin número' : (document.getElementById('clientPhoneReparacion').value || 'No proporcionado');
+    const model = document.getElementById('deviceModel').value;
+    const repairType = document.getElementById('repairType').value;
+    const tienda = isAdmin() ? document.getElementById('tiendaReparacion').value : currentStore;
+    const atendio = document.getElementById('atendioReparacion').value;
+    const tecnico = document.getElementById('tecnicoReparacion').value;
+    const comentarios = document.getElementById('reparacionComentarios').value;
+    const estadoElectrico = document.getElementById('reparacionEstadoElectrico').value;
+    const estadoFisico = document.getElementById('reparacionEstadoFisico').value;
+    const totalCost = parseFloat(document.getElementById('costTotalReparacion').value).toFixed(2);
+    const advanceCost = parseFloat(document.getElementById('costAdvanceReparacion').value || '0').toFixed(2);
+
+    const fields = [
+        { label: '👤 Nombre del cliente', value: clientName },
+        { label: '📞 Teléfono', value: phone },
+        { label: '📱 Modelo del equipo', value: model },
+        { label: '💰 Costo total', value: `$${totalCost}` },
+        { label: '🤝 Anticipo', value: `$${advanceCost}` },
+    ];
+
+    showConfirmModal(fields, () => {
+        let newTicket = {
+            id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+            type: 'Reparación',
+            client: clientName,
+            phone: phone,
+            model: model,
+            repairType: repairType,
+            tienda: tienda,
+            atendio: atendio,
+            tecnico: tecnico,
+            comentarios: comentarios,
+            estadoElectrico: estadoElectrico,
+            estadoFisico: estadoFisico,
+            totalCost: totalCost,
+            advanceCost: advanceCost,
+            status: 'Pendiente',
+            createdAt: new Date().toLocaleString(),
+            timestamp: Date.now(),
+            completedAt: null
+        };
+        setDoc(doc(db, "reparaciones", newTicket.id), newTicket);
+        e.target.reset();
+        // Reset phone checkbox
+        const noPhoneCb = document.getElementById('noPhoneReparacion');
+        const phoneinput = document.getElementById('clientPhoneReparacion');
+        if (noPhoneCb) noPhoneCb.checked = false;
+        if (phoneinput) { phoneinput.disabled = false; phoneinput.placeholder = 'Ej: 555 123 4567'; }
+        applyRolesAndUI();
+    });
+});
+
+window.updateTicketStatus = function (id, newStatus, type) {
+    let collection = type === 'Factura' ? facturas : reparaciones;
+    const ticketIndex = collection.findIndex(t => t.id === id);
+    if (ticketIndex !== -1) {
+        collection[ticketIndex].status = newStatus;
+        if (newStatus === 'Realizado' || newStatus === 'Cancelado') {
+            collection[ticketIndex].completedAt = new Date().toLocaleString();
+            if (newStatus === 'Realizado') {
+                collection[ticketIndex].advanceCost = collection[ticketIndex].totalCost;
+            }
+        } else {
+            collection[ticketIndex].completedAt = null;
         }
 
-        productListEl.innerHTML = filtered.map(p => `
-            <div class="product-item" onclick="window.addToTicket('${p.id}')" title="Click para agregar al ticket">
-                <div class="info">
-                    <span class="sku">${p.sku}</span>
-                    <span class="name">${p.name}</span>
+        if (type === 'Factura') {
+            setDoc(doc(db, "facturas", collection[ticketIndex].id), collection[ticketIndex]);
+        } else {
+            setDoc(doc(db, "reparaciones", collection[ticketIndex].id), collection[ticketIndex]);
+        }
+    }
+}
+
+window.deleteTicket = function (id, type) {
+    if (!isAdmin()) return;
+    if (confirm('¿Estás seguro de eliminar este ticket?')) {
+        if (type === 'Factura') {
+            deleteDoc(doc(db, "facturas", id));
+        } else {
+            deleteDoc(doc(db, "reparaciones", id));
+        }
+    }
+}
+
+filterReparaciones.addEventListener('change', renderReparaciones);
+
+if (searchInputFacturas) searchInputFacturas.addEventListener('input', renderFacturas);
+if (searchStoreFacturas) searchStoreFacturas.addEventListener('change', renderFacturas);
+
+if (searchInputReparaciones) searchInputReparaciones.addEventListener('input', renderReparaciones);
+if (searchStoreReparaciones) searchStoreReparaciones.addEventListener('change', renderReparaciones);
+
+// Botones de limpiar búsqueda
+const clearSearchFacturasBtn = document.getElementById('clearSearchFacturas');
+if (clearSearchFacturasBtn) {
+    clearSearchFacturasBtn.addEventListener('click', () => {
+        if (searchInputFacturas) { searchInputFacturas.value = ''; renderFacturas(); }
+    });
+}
+const clearSearchReparacionesBtn = document.getElementById('clearSearchReparaciones');
+if (clearSearchReparacionesBtn) {
+    clearSearchReparacionesBtn.addEventListener('click', () => {
+        if (searchInputReparaciones) { searchInputReparaciones.value = ''; renderReparaciones(); }
+    });
+}
+
+btnClearReparaciones.addEventListener('click', () => {
+    if (!isAdmin()) return;
+    if (confirm('¿Eliminar todos los tickets Realizados y Cancelados de Reparación?')) {
+        const toDelete = reparaciones.filter(t => t.status !== 'Pendiente');
+        toDelete.forEach(t => deleteDoc(doc(db, "reparaciones", t.id)));
+    }
+});
+
+btnDeleteOldFacturas.addEventListener('click', () => {
+    if (!isAdmin()) return;
+    if (confirm('¿Eliminar las facturas de hace más de 1 mes?')) {
+        const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+        const now = Date.now();
+        const toDelete = facturas.filter(t => {
+            if (t.timestamp) return (now - t.timestamp) > ONE_MONTH_MS;
+            return false;
+        });
+        toDelete.forEach(t => deleteDoc(doc(db, "facturas", t.id)));
+    }
+});
+
+function updateStatsFacturas() {
+    const allFac = isAdmin() ? facturas : facturas.filter(t => t.tienda === currentStore);
+    if (countPendingFacturas) countPendingFacturas.textContent = allFac.filter(t => t.status === 'Pendiente').length;
+    if (countDoneFacturas) countDoneFacturas.textContent = allFac.filter(t => t.status === 'Realizado').length;
+    if (countCancelledFacturas) countCancelledFacturas.textContent = allFac.filter(t => t.status === 'Cancelado').length;
+}
+
+function updateStatsReparaciones() {
+    const list = getDisplayReparaciones(); // esto sin filter extra
+    const allRep = isAdmin() ? reparaciones : reparaciones.filter(t => t.tienda === currentStore);
+    countPendingReparaciones.textContent = allRep.filter(t => t.status === 'Pendiente').length;
+    countDoneReparaciones.textContent = allRep.filter(t => t.status === 'Realizado').length;
+    countCancelledReparaciones.textContent = allRep.filter(t => t.status === 'Cancelado').length;
+}
+
+// ==================== PAYMENT CONFIRM MODAL ====================
+let _pendingPaymentTicketId = null;
+
+btnCancelPaymentConfirm.addEventListener('click', () => {
+    paymentConfirmModal.classList.add('hidden');
+    _pendingPaymentTicketId = null;
+});
+btnAcceptPaymentConfirm.addEventListener('click', () => {
+    if (!_pendingPaymentTicketId) return;
+    const ticketIdx = facturas.findIndex(t => t.id === _pendingPaymentTicketId);
+    if (ticketIdx !== -1) {
+        facturas[ticketIdx].paymentConfirmed = true;
+        facturas[ticketIdx].paymentConfirmedAt = new Date().toLocaleString();
+        facturas[ticketIdx].paymentConfirmedBy = currentUser1 ? currentUser1.username : 'Admin';
+        setDoc(doc(db, "facturas", facturas[ticketIdx].id), facturas[ticketIdx]);
+    }
+    paymentConfirmModal.classList.add('hidden');
+    _pendingPaymentTicketId = null;
+});
+
+window.openPaymentConfirm = function(id) {
+    const ticket = facturas.find(t => t.id === id);
+    if (!ticket) return;
+    _pendingPaymentTicketId = id;
+    paymentConfirmBody.innerHTML = `
+        <div style="margin-bottom:0.5rem;"><strong>Cliente:</strong> ${ticket.client}</div>
+        <div style="margin-bottom:0.5rem;"><strong>Teléfono:</strong> ${ticket.phone || 'N/A'}</div>
+        <div style="margin-bottom:0.5rem;"><strong>Total:</strong> $${ticket.totalCost}</div>
+        <div><strong>Fecha:</strong> ${ticket.createdAt}</div>
+    `;
+    paymentConfirmModal.classList.remove('hidden');
+};
+
+function renderTicketCard(ticket) {
+    let statusIcon = '';
+    if (ticket.status === 'Pendiente') statusIcon = '<i class="fa-solid fa-clock"></i>';
+    if (ticket.status === 'Realizado') statusIcon = '<i class="fa-solid fa-check"></i>';
+    if (ticket.status === 'Cancelado') statusIcon = '<i class="fa-solid fa-xmark"></i>';
+
+    let pendingCost = (parseFloat(ticket.totalCost) - parseFloat(ticket.advanceCost)).toFixed(2);
+    let creationDate = ticket.createdAt || ticket.date;
+
+    const adminDeleteMarkup = isAdmin() ? `<button class="btn-delete" onclick="deleteTicket('${ticket.id}', '${ticket.type}')" title="Eliminar Ticket"><i class="fa-solid fa-trash"></i></button>` : '';
+
+    // ---- Button visibility rules ----
+    // FACTURAS:
+    //   - Si está Cancelado: NO mostrar botón "Realizado" ni "Pendiente"
+    //   - Si está Realizado: NO mostrar botón "Cancelado" (ya fue realizado)
+    //   - Botón de pago confirmado solo para admin/tester y si NO está ya confirmado
+    // REPARACIONES:
+    //   - Si está Realizado o Cancelado: NO mostrar ningún botón de cambio de estado
+
+    let actionButtons = `<button class="btn-status" onclick="printTicket('${ticket.id}', '${ticket.type}')" title="Imprimir Ticket"><i class="fa-solid fa-print" style="color:#475569"></i></button>`;
+
+    if (ticket.type === 'Factura') {
+        if (ticket.status === 'Realizado') {
+            // No mostrar Cancelado (ya realizado, sólo confirmar pago)
+        } else if (ticket.status === 'Cancelado') {
+            // No mostrar Realizado ni Pendiente
+        } else {
+            // Pendiente o cualquier otro: mostrar Realizado y Cancelado
+            actionButtons += `<button class="btn-status" onclick="updateTicketStatus('${ticket.id}', 'Realizado', '${ticket.type}')" title="Marcar como Realizado"><i class="fa-solid fa-check" style="color:var(--status-done)"></i></button>`;
+            actionButtons += `<button class="btn-status" onclick="updateTicketStatus('${ticket.id}', 'Cancelado', '${ticket.type}')" title="Marcar como Cancelado"><i class="fa-solid fa-xmark" style="color:var(--status-cancelled)"></i></button>`;
+        }
+        // Botón de confirmación de pago (solo admin/tester)
+        if (isAdmin() && ticket.status === 'Realizado' && !ticket.paymentConfirmed) {
+            actionButtons += `<button class="btn-status btn-pay-confirm" onclick="openPaymentConfirm('${ticket.id}')" title="Confirmar Pago (Admin)"><i class="fa-solid fa-money-bill-wave" style="color:#10b981"></i></button>`;
+        }
+        if (ticket.paymentConfirmed) {
+            actionButtons += `<span class="payment-confirmed-badge" title="Pago confirmado por ${ticket.paymentConfirmedBy || 'Admin'}"><i class="fa-solid fa-circle-check"></i> Pago OK</span>`;
+        }
+    } else {
+        // REPARACIONES
+        if (ticket.status === 'Pendiente') {
+            // Puede cambiar a Realizado o Cancelado
+            actionButtons += `<button class="btn-status" onclick="updateTicketStatus('${ticket.id}', 'Realizado', '${ticket.type}')" title="Marcar como Realizado"><i class="fa-solid fa-check" style="color:var(--status-done)"></i></button>`;
+            actionButtons += `<button class="btn-status" onclick="updateTicketStatus('${ticket.id}', 'Cancelado', '${ticket.type}')" title="Marcar como Cancelado"><i class="fa-solid fa-xmark" style="color:var(--status-cancelled)"></i></button>`;
+        }
+        // Si está Realizado o Cancelado: NO mostrar botones de cambio de estado
+    }
+
+    actionButtons += adminDeleteMarkup;
+
+    // Phone display: reparaciones may have phone too
+    const phoneDisplay = ticket.phone ? `<div><i class="fa-solid fa-phone" style="width:20px"></i> Tel: <strong>${ticket.phone}</strong></div>` : '';
+
+    return `
+        <div class="ticket-card" data-status="${ticket.status}">
+            <div class="ticket-top">
+                <div class="ticket-info">
+                    <h3>${ticket.type} - ${ticket.client}</h3>
+                    <div style="display:flex; gap:1rem; margin-top: 0.5rem; flex-wrap:wrap; font-size:0.85rem;">
+                        <span style="background:var(--bg-color); padding: 0.2rem 0.5rem; border-radius:4px;"><i class="fa-solid fa-store" style="color:var(--primary-light)"></i> <strong>${ticket.tienda || 'N/A'}</strong></span>
+                        <span style="background:var(--bg-color); padding: 0.2rem 0.5rem; border-radius:4px;"><i class="fa-solid fa-user-tag" style="color:var(--primary-light)"></i> Atendió: <strong>${ticket.atendio || 'N/A'}</strong></span>
+                        ${ticket.tecnico ? `<span style="background:var(--bg-color); padding: 0.2rem 0.5rem; border-radius:4px;"><i class="fa-solid fa-screwdriver-wrench" style="color:var(--primary-light)"></i> Técnico: <strong>${ticket.tecnico}</strong></span>` : ''}
+                    </div>
+                    <div class="ticket-details">
+                        ${ticket.type === 'Factura' ? `
+                            <div><i class="fa-solid fa-phone" style="width:20px"></i> Teléfono: <strong>${ticket.phone || 'N/A'}</strong></div>
+                        ` : `
+                            ${phoneDisplay}
+                            <div><i class="fa-solid fa-mobile-button" style="width:20px"></i> Modelo: <strong>${ticket.model}</strong></div>
+                            <div><i class="fa-solid fa-wrench" style="width:20px"></i> Falla/Reparación: <strong>${ticket.repairType}</strong></div>
+                            ${ticket.estadoElectrico ? `<div><i class="fa-solid fa-bolt" style="width:20px"></i> Estado Eléc.: <strong>${ticket.estadoElectrico}</strong></div>` : ''}
+                            ${ticket.estadoFisico ? `<div><i class="fa-solid fa-magnifying-glass" style="width:20px"></i> Estado Físico: <strong>${ticket.estadoFisico}</strong></div>` : ''}
+                            ${ticket.comentarios ? `<div style="margin-top:0.5rem; padding:0.5rem; background:var(--bg-color); border-radius:6px; font-size:0.8rem;"><strong>Comentarios del cliente:</strong><br>${ticket.comentarios}</div>` : ''}
+                        `}
+                    </div>
+                    <div class="cobro-badge">
+                        <div>Total: <strong>$${ticket.totalCost}</strong> &bull; Anticipo: <strong>$${ticket.advanceCost}</strong></div>
+                        ${parseFloat(pendingCost) > 0 ? `<div style="margin-top: 0.25rem; font-size:0.8rem; color:#ef4444;">Por cobrar: $${pendingCost}</div>` : `<div style="margin-top: 0.25rem; font-size:0.8rem; color:#10b981;">Totalmente pagado</div>`}
+                    </div>
+                </div>
+                <div style="text-align: right;">
+                    <div class="ticket-badge-status">${statusIcon} ${ticket.status}</div>
+                </div>
+            </div>
+            
+            <div class="ticket-bottom" style="display:flex; justify-content:space-between; align-items:flex-end;">
+                <div class="ticket-date-area">
+                    <div class="ticket-date"><i class="fa-regular fa-calendar-plus"></i> Creado: <strong>${creationDate}</strong></div>
+                    ${ticket.completedAt ? `<div class="ticket-date" style="margin-top:0.25rem; color: ${ticket.status === 'Realizado' ? 'var(--status-done)' : 'var(--status-cancelled)'}"><i class="fa-solid fa-flag-checkered"></i> Concluido: <strong>${ticket.completedAt}</strong></div>` : ''}
+                    ${ticket.paymentConfirmed ? `<div class="ticket-date" style="margin-top:0.25rem; color:#10b981;"><i class="fa-solid fa-circle-check"></i> Pago confirmado por <strong>${ticket.paymentConfirmedBy || 'Admin'}</strong> el ${ticket.paymentConfirmedAt || ''}</div>` : ''}
+                </div>
+                <div class="ticket-actions">
+                    ${actionButtons}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderFacturas() {
+    const list = getDisplayFacturas();
+    if (list.length === 0) {
+        containerFacturas.innerHTML = `<div class="empty-state"><i class="fa-solid fa-inbox"></i><p>No hay facturas para mostrar.</p></div>`;
+        return;
+    }
+    containerFacturas.innerHTML = list.map(renderTicketCard).join('');
+}
+
+function renderReparaciones() {
+    const list = getDisplayReparaciones();
+    if (list.length === 0) {
+        containerReparaciones.innerHTML = `<div class="empty-state"><i class="fa-solid fa-inbox"></i><p>No hay reparaciones para mostrar.</p></div>`;
+        return;
+    }
+    containerReparaciones.innerHTML = list.map(renderTicketCard).join('');
+}
+
+// ==================== ADMIN PANEL LOGIC ====================
+function saveUsers() {
+    // Ya no se usa localmente. Se envía directo a Firebase con setDoc.
+}
+
+function renderAdminUsers() {
+    usersContainer.innerHTML = '';
+    users.forEach(u => {
+        const isSelf = (currentUser1 && currentUser1.id === u.id) || (currentUser2 && currentUser2.id === u.id);
+        
+        let canModify = false;
+        if (isTester()) {
+            canModify = true; // tester can modify anyone
+        } else if (isAdmin() && u.role !== 'admin' && u.role !== 'tester') {
+            canModify = true; // admin can modify clients
+        } else if (isSelf) {
+            canModify = true; // anyone can modify themselves in theory, but this UI only shows for admins
+        }
+
+        let roleBadge = '';
+        if (u.role === 'tester') roleBadge = '<span class="admin-badge" style="background:var(--primary-dark)">Tester</span>';
+        else if (u.role === 'admin') roleBadge = '<span class="admin-badge">Admin</span>';
+
+        let passDisplay = u.password;
+        if (u.role === 'tester' && !isTester()) {
+            passDisplay = '********';
+        }
+
+        usersContainer.innerHTML += `
+            <div class="user-list-item">
+                <div>
+                    <h3 style="font-size:1rem;">${u.username} ${roleBadge}</h3>
+                    <div style="font-size:0.8rem; color:#666; font-family:monospace;">Pass: ${passDisplay}</div>
                 </div>
                 <div>
-                    <div class="price">${formatMoney(p.price)}</div>
-                    <div class="stock-badge">Stock: ${p.stock}</div>
+                    ${canModify ? `<button class="btn btn-outline" style="color:#666; border-color:#ccc; padding:0.4rem 0.6rem; font-size:0.85rem;" onclick="promptResetPassword('${u.id}')">Cambiar Clave</button>` : ''}
+                    ${(canModify && !isSelf && u.role !== 'tester') ? `<button class="btn btn-delete" style="padding:0.4rem 0.6rem; font-size:0.85rem;" onclick="deleteUser('${u.id}')"><i class="fa-solid fa-trash"></i></button>` : ''}
                 </div>
             </div>
-        `).join('');
+        `;
+    });
+    // Add new user btn
+    usersContainer.innerHTML += `
+        <div style="margin-top:1rem;">
+            <button class="btn btn-outline" style="color:var(--primary-dark); border-color:var(--primary-dark); padding:0.4rem 0.8rem;" onclick="promptNewUser()">+ Añadir Empleado</button>
+        </div>
+    `;
+}
+
+window.promptResetPassword = function (id) {
+    const newPass = prompt("Ingresa la nueva contraseña:");
+    if (newPass) {
+        let userIdx = users.findIndex(u => u.id === id);
+        if (userIdx > -1) {
+            users[userIdx].password = newPass;
+            setDoc(doc(db, "users", id), users[userIdx]);
+            alert("Contraseña actualizada. Los cambios se reflejarán en breve.");
+        }
     }
+}
+window.promptNewUser = function () {
+    const username = prompt("Nombre del empleado:");
+    if (!username) return;
+    const password = prompt("Contraseña temporal (ej: 123):");
+    if (!password) return;
+    const newUser = { id: Date.now().toString(), username, password, role: 'client' };
+    setDoc(doc(db, "users", newUser.id), newUser);
+}
+window.deleteUser = function (id) {
+    if (confirm("¿Eliminar usuario?")) {
+        deleteDoc(doc(db, "users", id));
+    }
+}
 
-    // ==================== TICKET ====================
-    window.addToTicket = function (productId) {
-        const product = products.find(p => p.id === productId);
-        if (!product) { showToast('Producto no encontrado', 'error'); return; }
-        if (product.stock <= 0) { showToast('⚠️ Producto sin stock disponible', 'warning'); return; }
+btnResetStore.addEventListener('click', () => {
+    if (confirm("ESTO BORRARÁ LA TIENDA DE ESTE EQUIPO.\nLa computadora se reiniciará a la configuración inicial y requerirá volver a seleccionar a qué tienda pertenece.\n¿Continuar?")) {
+        DB.removeStore();
+        location.reload();
+    }
+});
 
-        const existing = ticketItems.find(i => i.id === productId);
-        if (existing) {
-            if (existing.qty >= product.stock) {
-                showToast('Stock máximo alcanzado (' + product.stock + ' disponibles)', 'warning');
-                return;
+btnResetDB.addEventListener('click', () => {
+    if (prompt("Escribe CONFIRMAR para borrar todos los tickets.") === "CONFIRMAR") {
+        DB.clearTickets();
+        location.reload();
+    }
+});
+
+// ==================== PHONE VALIDATION ====================
+const clientPhoneFacturaInput = document.getElementById('clientPhone');
+if (clientPhoneFacturaInput) {
+    clientPhoneFacturaInput.addEventListener('input', function (e) {
+        let value = this.value.replace(/[^0-9\s]/g, '');
+        let numCount = 0;
+        let limitIndex = value.length;
+        for (let i = 0; i < value.length; i++) {
+            if (/[0-9]/.test(value[i])) { numCount++; if (numCount === 10) { limitIndex = i + 1; break; } }
+        }
+        if (numCount >= 10) value = value.substring(0, limitIndex);
+        this.value = value;
+    });
+}
+
+// Misma validación para el teléfono de Reparaciones (clientPhoneReparacionInput ya declarado arriba)
+if (clientPhoneReparacionInput) {
+    clientPhoneReparacionInput.addEventListener('input', function (e) {
+        if (this.disabled) return; // ignorar si "Sin teléfono" está marcado
+        let value = this.value.replace(/[^0-9\s]/g, '');
+        let numCount = 0;
+        let limitIndex = value.length;
+        for (let i = 0; i < value.length; i++) {
+            if (/[0-9]/.test(value[i])) { numCount++; if (numCount === 10) { limitIndex = i + 1; break; } }
+        }
+        if (numCount >= 10) value = value.substring(0, limitIndex);
+        this.value = value;
+    });
+}
+
+// ==================== IMPRESIÓN ====================
+window.printTicket = function (id, type) {
+    let collection = type === 'Factura' ? facturas : reparaciones;
+    const ticket = collection.find(t => t.id === id);
+    if (!ticket) return;
+
+    let pendingCost = (parseFloat(ticket.totalCost) - parseFloat(ticket.advanceCost)).toFixed(2);
+    let receiptHTML = `
+    <html>
+    <head>
+        <title>Ticket ${ticket.id}</title>
+        <style>
+            @page { margin: 0; }
+            body { font-family: 'Courier New', monospace; width: 300px; margin: 0 auto; color: #000; background: #fff; font-size: 14px; padding: 10px; box-sizing: border-box; }
+            .header { text-align: center; margin-bottom: 10px; }
+            .header h1 { font-size: 18px; margin: 0; font-weight: bold;}
+            .header p { margin: 2px 0; font-size: 12px; }
+            .divider { border-bottom: 1px dashed #000; margin: 10px 0; }
+            .flex-row { display: flex; justify-content: space-between; margin-bottom: 5px;}
+            .item { text-align: left; margin-bottom: 5px; word-wrap: break-word;}
+            .total { font-weight: bold; font-size: 16px; margin-top: 10px; border-top: 1px dashed #000; padding-top: 5px;}
+            .footer { text-align: center; margin-top: 20px; font-size: 12px; }
+        </style>
+    </head>
+    <body onload="setTimeout(function(){ window.print(); }, 200);">
+        <div class="header">
+            <h1>REALPHONE</h1>
+            <p>by Telcel</p>
+            <p>Sucursal: ${ticket.tienda || 'N/A'}</p>
+            <p style="font-size: 10px;">${ticket.tienda ? (STORE_ADDRESSES[ticket.tienda] || '') : ''}</p>
+            <p>Ticket de ${ticket.type.toUpperCase()}</p>
+            <p>Fecha: ${ticket.createdAt || ticket.date}</p>
+        </div>
+        <div class="divider"></div>
+        <div class="item"><strong>Cliente:</strong> ${ticket.client}</div>
+        ${ticket.type === 'Factura' ? `<div class="item"><strong>Teléfono:</strong> ${ticket.phone}</div>` : ''}
+        ${ticket.type === 'Reparación' ? `
+            <div class="item"><strong>Modelo:</strong> ${ticket.model}</div>
+            <div class="item"><strong>Detalle:</strong> ${ticket.repairType}</div>
+        ` : ''}
+        <div class="item"><strong>Atendió:</strong> ${ticket.atendio || 'N/A'}</div>
+        <div class="item"><strong>Estado:</strong> ${ticket.status}</div>
+        <div class="divider"></div>
+        <div class="flex-row"><span>Costo Total:</span> <span>$${ticket.totalCost}</span></div>
+        <div class="flex-row"><span>Anticipo:</span> <span>$${ticket.advanceCost}</span></div>
+        <div class="flex-row total"><span>Restante:</span> <span>$${parseFloat(pendingCost) > 0 ? pendingCost : '0.00'}</span></div>
+        <div class="footer"><p>*** Gracias por su preferencia ***</p></div>
+    </body>
+    </html>`;
+
+    const printIframe = document.createElement('iframe');
+    printIframe.style.position = 'absolute'; printIframe.style.width = '0'; printIframe.style.height = '0'; printIframe.style.border = 'none';
+    document.body.appendChild(printIframe);
+    printIframe.contentDocument.open(); printIframe.contentDocument.write(receiptHTML); printIframe.contentDocument.close();
+    setTimeout(() => { if (document.body.contains(printIframe)) document.body.removeChild(printIframe); }, 3000);
+};
+
+
+// ==================== APARTADO LOGIC ====================
+function getDisplayApartados() {
+    let list = isAdmin() ? apartados : apartados.filter(t => t.tienda === currentStore);
+    const filter = filterApartado ? filterApartado.value : 'Todos';
+    if (filter !== 'Todos') list = list.filter(t => t.status === filter);
+    if (isAdmin() && searchStoreApartado && searchStoreApartado.value) {
+        list = list.filter(t => t.tienda === searchStoreApartado.value);
+    }
+    if (searchInputApartado && searchInputApartado.value.trim()) {
+        const val = searchInputApartado.value.toLowerCase().trim();
+        list = list.filter(t => {
+            if ((t.client || '').toLowerCase().includes(val)) return true;
+            const d = (t.createdAt || '').toLowerCase();
+            if (d.includes(val)) return true;
+            let [dd, mm, yy] = val.split('/');
+            if (dd && mm) {
+                let s = `${parseInt(dd)  }/${parseInt(mm)}`;
+                if (yy) s += `/${yy}`;
+                if (d.includes(s)) return true;
             }
-            existing.qty += 1;
-        } else {
-            ticketItems.push({
-                id:    product.id,
-                sku:   product.sku,
-                name:  product.name,
-                price: product.price,
-                cost:  product.cost,
-                stock: product.stock,
-                qty:   1
-            });
-        }
-        updateTicketDisplay();
-        showToast('Agregado: ' + product.name, 'success');
-    };
-
-    window.removeTicketItem = function (index) {
-        const removed = ticketItems.splice(index, 1);
-        updateTicketDisplay();
-        if (removed.length) showToast('Eliminado: ' + removed[0].name, 'info');
-    };
-
-    function updateTicketDisplay() {
-        if (!ticketBody) return;
-
-        if (ticketItems.length === 0) {
-            ticketBody.innerHTML =
-                '<tr><td colspan="7" class="empty-ticket">0 Productos en la venta actual.</td></tr>';
-        } else {
-            ticketBody.innerHTML = ticketItems.map((item, idx) => `
-                <tr>
-                    <td>${item.sku}</td>
-                    <td>${item.name}</td>
-                    <td>${formatMoney(item.price)}</td>
-                    <td>${item.qty}</td>
-                    <td>${formatMoney(item.price * item.qty)}</td>
-                    <td>${item.stock}</td>
-                    <td><i class="fas fa-times-circle delete-icon"
-                           onclick="window.removeTicketItem(${idx})"
-                           title="Eliminar producto"></i></td>
-                </tr>
-            `).join('');
-        }
-
-        const total = ticketItems.reduce((s, i) => s + (i.price * i.qty), 0);
-        totalDisplay.textContent = formatMoney(total);
-
-        const pago = parseFloat(paymentInput.value) || 0;
-        paymentDisplay.textContent = formatMoney(pago);
-        changeDisplay.textContent  = formatMoney(Math.max(0, pago - total));
-    }
-
-    // ==================== COBRAR ====================
-    document.getElementById('btnCobrar').addEventListener('click', function () {
-        if (ticketItems.length === 0) {
-            showToast('Agrega productos al ticket antes de cobrar', 'warning');
-            return;
-        }
-
-        const total = ticketItems.reduce((s, i) => s + (i.price * i.qty), 0);
-        const pago  = parseFloat(paymentInput.value) || 0;
-
-        if (pago < total) {
-            showToast('Pago insuficiente. Faltan: ' + formatMoney(total - pago), 'error');
-            return;
-        }
-
-        if (!confirm(
-            '¿Confirmar venta por ' + formatMoney(total) + '?\n' +
-            'Pago: ' + formatMoney(pago) + '\n' +
-            'Cambio: ' + formatMoney(pago - total)
-        )) return;
-
-        // Descontar stock
-        ticketItems.forEach(item => {
-            const prod = products.find(p => p.id === item.id);
-            if (prod) prod.stock = Math.max(0, prod.stock - item.qty);
-        });
-
-        // Obtener quién atendió (si hay doble sesión)
-        const cashierSelect = document.getElementById('saleCashierSelect');
-        let selectedCashier = currentUser.fullName || currentUser.username;
-        if (cashierSelect && cashierSelect.style.display !== 'none' && cashierSelect.value) {
-            selectedCashier = cashierSelect.value;
-        }
-
-        // Registrar venta
-        const sale = {
-            id:      'SALE-' + Date.now(),
-            date:    new Date().toISOString().slice(0, 10),
-            time:    new Date().toLocaleTimeString(),
-            branch:  currentBranch,
-            cashier: selectedCashier,
-            items:   ticketItems.map(i => ({ ...i })),
-            total:   total,
-            profit:  ticketItems.reduce((s, i) => s + ((i.price - i.cost) * i.qty), 0),
-            payment: pago,
-            change:  pago - total
-        };
-        salesHistory.push(sale);
-        saveData();
-
-        // Imprimir ticket
-        printSaleTicket(sale, ticketCounter);
-
-        showToast('✅ Venta registrada — Ticket #' + ticketCounter + ' — Total: ' + formatMoney(total), 'success');
-
-        // Nuevo ticket
-        ticketItems = [];
-        paymentInput.value = '';
-        ticketCounter++;
-        ticketNumberEl.textContent = ticketCounter;
-        updateTicketDisplay();
-        renderProducts(searchInput.value);
-    });
-
-    // ==================== BOTONES DE ACCIÓN ====================
-    paymentInput.addEventListener('input', updateTicketDisplay);
-
-    document.getElementById('btnDeleteItem').addEventListener('click', function () {
-        if (ticketItems.length === 0) { showToast('No hay productos en el ticket', 'warning'); return; }
-        const removed = ticketItems.pop();
-        updateTicketDisplay();
-        showToast('Eliminado: ' + removed.name, 'info');
-    });
-
-    document.getElementById('btnBuscar').addEventListener('click', function () {
-        searchInput.focus();
-        searchInput.select();
-    });
-
-    document.getElementById('btnPendiente').addEventListener('click', function () {
-        if (ticketItems.length === 0) { showToast('No hay productos para dejar pendiente', 'warning'); return; }
-        showToast('📋 Ticket #' + ticketCounter + ' guardado como pendiente', 'info');
-    });
-
-    // ==================== BÚSQUEDA ====================
-    document.getElementById('btnSearch').addEventListener('click', function () {
-        renderProducts(searchInput.value);
-    });
-
-    searchInput.addEventListener('input', function () {
-        renderProducts(this.value);
-    });
-
-    searchInput.addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') renderProducts(this.value);
-    });
-
-    // ==================== CATEGORÍAS ====================
-    document.getElementById('categoryTabs').addEventListener('click', function (e) {
-        if (e.target.classList.contains('category-tab')) {
-            document.querySelectorAll('.category-tab').forEach(b => b.classList.remove('active'));
-            e.target.classList.add('active');
-            activeCategory = e.target.dataset.cat;
-            renderProducts(searchInput.value);
-        }
-    });
-
-    // ==================== MODAL DE INVENTARIO ====================
-    function openInventoryModal() {
-        inventoryModal.classList.add('active');
-        resetImportState();
-    }
-
-    function closeInventoryModal() {
-        inventoryModal.classList.remove('active');
-        resetImportState();
-    }
-
-    function resetImportState() {
-        pendingImportData = [];
-        const preview = document.getElementById('importPreview');
-        const actions = document.getElementById('importActions');
-        const status  = document.getElementById('importStatus');
-        if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
-        if (actions) actions.style.display = 'none';
-        if (status) status.innerHTML = '';
-    }
-
-    // Modal de Configuración General
-    const configModal = document.getElementById('configModal');
-    const btnConfig = document.getElementById('btnConfig');
-    if (btnConfig) btnConfig.addEventListener('click', function() {
-        const isAdminOrTester = currentUser && (currentUser.role === 'admin' || currentUser.role === 'tester');
-        document.getElementById('btnInventario').style.display = isAdminOrTester ? 'flex' : 'none';
-        document.getElementById('btnAddProduct').style.display = isAdminOrTester ? 'flex' : 'none';
-        configModal.classList.add('active');
-    });
-    const btnCloseConfig = document.getElementById('btnCloseConfig');
-    if (btnCloseConfig) btnCloseConfig.addEventListener('click', () => configModal.classList.remove('active'));
-    
-    // Cerrar config modal al click fuera
-    if (configModal) {
-        configModal.addEventListener('click', function (e) {
-            if (e.target === configModal) configModal.classList.remove('active');
+            return false;
         });
     }
+    return list;
+}
 
-    document.getElementById('btnInventario').addEventListener('click', openInventoryModal);
-    document.getElementById('btnAddProduct').addEventListener('click', function() {
-        openInventoryModal();
-        // Activar tab "Agregar Producto"
-        document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-        document.querySelector('.modal-tab[data-tab="add"]').classList.add('active');
-        document.getElementById('tabAdd').classList.add('active');
-        setTimeout(() => document.getElementById('addSku').focus(), 100);
-    });
-    document.getElementById('btnCloseInventory').addEventListener('click', closeInventoryModal);
+function updateStatsApartado() {
+    const all = isAdmin() ? apartados : apartados.filter(t => t.tienda === currentStore);
+    const pEl = document.getElementById('countPendingApartado');
+    const dEl = document.getElementById('countDoneApartado');
+    const cEl = document.getElementById('countCancelledApartado');
+    if (pEl) pEl.textContent = all.filter(t => t.status === 'Pendiente').length;
+    if (dEl) dEl.textContent = all.filter(t => t.status === 'Concluido').length;
+    if (cEl) cEl.textContent = all.filter(t => t.status === 'Cancelado').length;
+}
 
-    // Cerrar modal al hacer click fuera
-    inventoryModal.addEventListener('click', function (e) {
-        if (e.target === inventoryModal) closeInventoryModal();
-    });
+function renderApartados() {
+    if (!containerApartado) return;
+    const list = getDisplayApartados();
+    if (list.length === 0) {
+        containerApartado.innerHTML = `<div class="empty-state"><i class="fa-solid fa-bookmark"></i><p>No hay apartados para mostrar.</p></div>`;
+        return;
+    }
+    containerApartado.innerHTML = list.map(renderTicketCardApartadoEncargo).join('');
+}
 
-    // Tabs del modal
-    document.querySelectorAll('.modal-tab').forEach(tab => {
-        tab.addEventListener('click', function () {
-            document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            this.classList.add('active');
-            const tabMap = { add: 'tabAdd', import: 'tabImport', export: 'tabExport', delete: 'tabDelete', categories: 'tabCategories' };
-            const tabId = tabMap[this.dataset.tab] || 'tabAdd';
-            const tabEl = document.getElementById(tabId);
-            if (tabEl) tabEl.classList.add('active');
-            if (this.dataset.tab === 'categories') renderCategoriesList();
-        });
-    });
-
-    // ==================== AGREGAR PRODUCTO (FORMULARIO) ====================
-    document.getElementById('addProductForm').addEventListener('submit', function (e) {
+if (formApartado) {
+    formApartado.addEventListener('submit', (e) => {
         e.preventDefault();
+        const clientName = document.getElementById('clientNameApartado').value;
+        const equipo = document.getElementById('equipoApartado').value;
+        const tienda = isAdmin() ? tiendaApartado.value : currentStore;
+        const atendio = atendioApartado.value;
+        const costo = parseFloat(document.getElementById('costoApartado').value).toFixed(2);
+        const adelanto = parseFloat(document.getElementById('adelantoApartado').value || '0').toFixed(2);
 
-        const sku   = document.getElementById('addSku').value.trim().toUpperCase();
-        const name  = document.getElementById('addName').value.trim();
-        const cat   = document.getElementById('addCategory').value;
-        const cost  = parseFloat(document.getElementById('addCost').value) || 0;
-        const price = parseFloat(document.getElementById('addPrice').value) || 0;
-        const stock = parseInt(document.getElementById('addStock').value) || 0;
-
-        if (!sku || !name) {
-            showToast('Completa los campos obligatorios (SKU y Nombre)', 'warning');
-            return;
-        }
-
-        if (price <= 0) {
-            showToast('El precio de venta debe ser mayor a 0', 'warning');
-            return;
-        }
-
-        // Verificar SKU duplicado
-        const existing = products.find(p => p.sku.toUpperCase() === sku);
-        if (existing) {
-            showToast('Ya existe un producto con SKU: ' + sku + ' (' + existing.name + ')', 'error');
-            document.getElementById('addSku').focus();
-            return;
-        }
-
-        const newProduct = {
-            id:       generateId(),
-            sku:      sku,
-            name:     name,
-            category: cat,
-            cost:     cost,
-            price:    price,
-            stock:    stock
-        };
-
-        products.push(newProduct);
-        saveData();
-        
-        renderProducts(document.getElementById('searchInput').value);
-        if (window.refreshDeleteProductSelect) window.refreshDeleteProductSelect();
-        
-        showToast('✅ Producto agregado al inventario', 'success');
-        
-        // Mostrar en "recién agregados"
-        const recentEl = document.getElementById('recentlyAdded');
-        const badge = `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--success-light);border:1px solid rgba(16,185,129,0.2);border-radius:8px;margin-bottom:6px;font-size:0.85rem;">
-            <i class="fas fa-check-circle" style="color:var(--success)"></i>
-            <strong>${sku}</strong> — ${name} — $${price.toFixed(2)} — Stock: ${stock}
-        </div>`;
-        recentEl.innerHTML = badge + recentEl.innerHTML;
-
-        // Limpiar form y enfocar SKU para agregar otro
-        this.reset();
-        document.getElementById('addCost').value = '0';
-        document.getElementById('addStock').value = '1';
-        document.getElementById('addSku').focus();
-    });
-
-    // ==================== IMPORTACIÓN DE EXCEL ====================
-    const dropZone  = document.getElementById('dropZone');
-    const fileInput = document.getElementById('fileInput');
-
-    // Click en la zona de drop
-    dropZone.addEventListener('click', () => fileInput.click());
-
-    // Drag & Drop
-    dropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropZone.classList.add('drag-over');
-    });
-
-    dropZone.addEventListener('dragleave', () => {
-        dropZone.classList.remove('drag-over');
-    });
-
-    dropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('drag-over');
-        const files = e.dataTransfer.files;
-        if (files.length > 0) processExcelFile(files[0]);
-    });
-
-    fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length > 0) processExcelFile(e.target.files[0]);
-        fileInput.value = ''; // Reset para permitir seleccionar el mismo archivo
-    });
-
-    function processExcelFile(file) {
-        const validTypes = [
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'application/vnd.ms-excel'
+        const fields = [
+            { label: '👤 Nombre del cliente', value: clientName },
+            { label: '📱 Equipo apartado', value: equipo },
+            { label: '💰 Costo total del equipo', value: `$${costo}` },
+            { label: '🤝 Adelanto de apartado', value: `$${adelanto}` },
         ];
-        const ext = file.name.split('.').pop().toLowerCase();
+        showConfirmModal(fields, () => {
+            const ticket = {
+                id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+                type: 'Apartado',
+                client: clientName,
+                equipo,
+                tienda,
+                atendio,
+                totalCost: costo,
+                advanceCost: adelanto,
+                status: 'Pendiente',
+                createdAt: new Date().toLocaleString(),
+                timestamp: Date.now(),
+                completedAt: null
+            };
+            setDoc(doc(db, 'apartados', ticket.id), ticket);
+            e.target.reset();
+            applyRolesAndUI();
+        });
+    });
+}
 
-        if (!validTypes.includes(file.type) && !['xlsx', 'xls'].includes(ext)) {
-            showToast('Formato no válido. Solo se aceptan archivos .xlsx o .xls', 'error');
-            return;
+if (filterApartado) filterApartado.addEventListener('change', renderApartados);
+if (searchInputApartado) searchInputApartado.addEventListener('input', renderApartados);
+if (searchStoreApartado) searchStoreApartado.addEventListener('change', renderApartados);
+const clearSearchApartadoBtn = document.getElementById('clearSearchApartado');
+if (clearSearchApartadoBtn) clearSearchApartadoBtn.addEventListener('click', () => { if (searchInputApartado) { searchInputApartado.value = ''; renderApartados(); } });
+
+if (btnClearApartado) {
+    btnClearApartado.addEventListener('click', () => {
+        if (!isAdmin()) return;
+        if (confirm('¿Eliminar todos los apartados Concluidos y Cancelados?')) {
+            apartados.filter(t => t.status !== 'Pendiente').forEach(t => deleteDoc(doc(db, 'apartados', t.id)));
         }
+    });
+}
 
-        const statusEl = document.getElementById('importStatus');
-        statusEl.innerHTML = '<span class="status-badge warning"><i class="fas fa-spinner fa-spin"></i> Procesando archivo...</span>';
-
-        const reader = new FileReader();
-        reader.onload = function (e) {
-            try {
-                const data = new Uint8Array(e.target.result);
-                const workbook = XLSX.read(data, { type: 'array' });
-
-                // Leer la primera hoja
-                const sheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[sheetName];
-                const jsonData  = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-
-                if (jsonData.length === 0) {
-                    statusEl.innerHTML = '<span class="status-badge error"><i class="fas fa-exclamation-circle"></i> El archivo está vacío</span>';
-                    return;
-                }
-
-                // Mapear columnas (flexible)
-                const mapped = mapImportData(jsonData);
-
-                if (mapped.length === 0) {
-                    statusEl.innerHTML = '<span class="status-badge error"><i class="fas fa-exclamation-circle"></i> No se encontraron columnas válidas (SKU, Nombre, Precio)</span>';
-                    return;
-                }
-
-                pendingImportData = mapped;
-                statusEl.innerHTML = `<span class="status-badge success"><i class="fas fa-check-circle"></i> ${mapped.length} productos leídos de "${file.name}"</span>`;
-
-                // Mostrar preview
-                renderImportPreview(mapped);
-                document.getElementById('importActions').style.display = 'flex';
-
-            } catch (err) {
-                console.error('Error procesando Excel:', err);
-                statusEl.innerHTML = '<span class="status-badge error"><i class="fas fa-exclamation-circle"></i> Error al leer el archivo: ' + err.message + '</span>';
-            }
-        };
-
-        reader.onerror = function () {
-            statusEl.innerHTML = '<span class="status-badge error"><i class="fas fa-exclamation-circle"></i> Error al leer el archivo</span>';
-        };
-
-        reader.readAsArrayBuffer(file);
+// ==================== ENCARGOS LOGIC ====================
+function getDisplayEncargos() {
+    let list = isAdmin() ? encargos : encargos.filter(t => t.tienda === currentStore);
+    const filter = filterEncargos ? filterEncargos.value : 'Todos';
+    if (filter !== 'Todos') list = list.filter(t => t.status === filter);
+    if (isAdmin() && searchStoreEncargos && searchStoreEncargos.value) {
+        list = list.filter(t => t.tienda === searchStoreEncargos.value);
     }
-
-    function mapImportData(jsonData) {
-        // Mapeo flexible de columnas — soporta varios nombres
-        const colMap = {
-            sku:      ['sku', 'codigo', 'código', 'code', 'cod', 'clave'],
-            name:     ['nombre', 'name', 'descripcion', 'descripción', 'producto', 'articulo', 'artículo'],
-            category: ['categoria', 'categoría', 'category', 'cat', 'tipo'],
-            cost:     ['costo', 'cost', 'precio_costo', 'costo_unitario'],
-            price:    ['precio', 'price', 'precio_venta', 'pvp', 'precio_unitario'],
-            stock:    ['stock', 'existencia', 'existencias', 'cantidad', 'qty', 'inventario', 'disponible']
-        };
-
-        function findCol(row, aliases) {
-            const keys = Object.keys(row);
-            for (const alias of aliases) {
-                const found = keys.find(k => k.toLowerCase().trim() === alias);
-                if (found) return row[found];
+    if (searchInputEncargos && searchInputEncargos.value.trim()) {
+        const val = searchInputEncargos.value.toLowerCase().trim();
+        list = list.filter(t => {
+            if ((t.client || '').toLowerCase().includes(val)) return true;
+            const d = (t.createdAt || '').toLowerCase();
+            if (d.includes(val)) return true;
+            let [dd, mm, yy] = val.split('/');
+            if (dd && mm) {
+                let s = `${parseInt(dd)}/${parseInt(mm)}`;
+                if (yy) s += `/${yy}`;
+                if (d.includes(s)) return true;
             }
-            return undefined;
+            return false;
+        });
+    }
+    return list;
+}
+
+function updateStatsEncargos() {
+    const all = isAdmin() ? encargos : encargos.filter(t => t.tienda === currentStore);
+    const pEl = document.getElementById('countPendingEncargos');
+    const dEl = document.getElementById('countDoneEncargos');
+    const cEl = document.getElementById('countCancelledEncargos');
+    if (pEl) pEl.textContent = all.filter(t => t.status === 'Pendiente').length;
+    if (dEl) dEl.textContent = all.filter(t => t.status === 'Concluido').length;
+    if (cEl) cEl.textContent = all.filter(t => t.status === 'Cancelado').length;
+}
+
+function renderEncargos() {
+    if (!containerEncargos) return;
+    const list = getDisplayEncargos();
+    if (list.length === 0) {
+        containerEncargos.innerHTML = `<div class="empty-state"><i class="fa-solid fa-box-archive"></i><p>No hay encargos para mostrar.</p></div>`;
+        return;
+    }
+    containerEncargos.innerHTML = list.map(renderTicketCardApartadoEncargo).join('');
+}
+
+if (formEncargo) {
+    formEncargo.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const clientName = document.getElementById('clientNameEncargo').value;
+        const contacto = document.getElementById('contactoEncargo').value || 'No proporcionado';
+        const equipo = document.getElementById('equipoEncargo').value;
+        const tienda = isAdmin() ? tiendaEncargo.value : currentStore;
+        const atendio = atendioEncargo.value;
+        const costo = parseFloat(document.getElementById('costoEncargo').value).toFixed(2);
+        const anticipo = parseFloat(document.getElementById('anticipoEncargo').value || '0').toFixed(2);
+
+        const fields = [
+            { label: '👤 Nombre del cliente', value: clientName },
+            { label: '📞 Número de contacto', value: contacto },
+            { label: '📦 Equipo a encargar', value: equipo },
+            { label: '💰 Costo total', value: `$${costo}` },
+            { label: '🤝 Anticipo', value: `$${anticipo}` },
+        ];
+        showConfirmModal(fields, () => {
+            const ticket = {
+                id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+                type: 'Encargo',
+                client: clientName,
+                phone: contacto,
+                equipo,
+                tienda,
+                atendio,
+                totalCost: costo,
+                advanceCost: anticipo,
+                status: 'Pendiente',
+                createdAt: new Date().toLocaleString(),
+                timestamp: Date.now(),
+                completedAt: null
+            };
+            setDoc(doc(db, 'encargos', ticket.id), ticket);
+            e.target.reset();
+            applyRolesAndUI();
+        });
+    });
+}
+
+if (filterEncargos) filterEncargos.addEventListener('change', renderEncargos);
+if (searchInputEncargos) searchInputEncargos.addEventListener('input', renderEncargos);
+if (searchStoreEncargos) searchStoreEncargos.addEventListener('change', renderEncargos);
+const clearSearchEncargosBtn = document.getElementById('clearSearchEncargos');
+if (clearSearchEncargosBtn) clearSearchEncargosBtn.addEventListener('click', () => { if (searchInputEncargos) { searchInputEncargos.value = ''; renderEncargos(); } });
+
+if (btnClearEncargos) {
+    btnClearEncargos.addEventListener('click', () => {
+        if (!isAdmin()) return;
+        if (confirm('¿Eliminar todos los encargos Concluidos y Cancelados?')) {
+            encargos.filter(t => t.status !== 'Pendiente').forEach(t => deleteDoc(doc(db, 'encargos', t.id)));
         }
+    });
+}
 
-        return jsonData
-            .map(row => {
-                const sku   = String(findCol(row, colMap.sku)  || '').trim();
-                const name  = String(findCol(row, colMap.name) || '').trim();
-                const cat   = String(findCol(row, colMap.category) || 'sin_categoria').trim().toLowerCase().replace(/\s+/g, '_');
-                const cost  = parseFloat(findCol(row, colMap.cost))  || 0;
-                const price = parseFloat(findCol(row, colMap.price)) || 0;
-                const stock = parseInt(findCol(row, colMap.stock))   || 0;
+// ==================== RENDER CARD (Apartado / Encargo) ====================
+function renderTicketCardApartadoEncargo(ticket) {
+    let statusIcon = '';
+    if (ticket.status === 'Pendiente') statusIcon = '<i class="fa-solid fa-clock"></i>';
+    if (ticket.status === 'Concluido') statusIcon = '<i class="fa-solid fa-check"></i>';
+    if (ticket.status === 'Cancelado') statusIcon = '<i class="fa-solid fa-xmark"></i>';
 
-                if (!sku && !name) return null; // Fila vacía
+    const pendingCost = (parseFloat(ticket.totalCost) - parseFloat(ticket.advanceCost)).toFixed(2);
+    const adminDeleteMarkup = isAdmin()
+        ? `<button class="btn-delete" onclick="deleteTicketAE('${ticket.id}','${ticket.type}')" title="Eliminar"><i class="fa-solid fa-trash"></i></button>`
+        : '';
 
-                return {
-                    sku:      sku || 'SIN-SKU',
-                    name:     name || 'Producto sin nombre',
-                    category: cat,
-                    cost:     cost,
-                    price:    price,
-                    stock:    stock
-                };
-            })
-            .filter(Boolean);
+    let actionButtons = `<button class="btn-status" onclick="printTicketAE('${ticket.id}','${ticket.type}')" title="Imprimir"><i class="fa-solid fa-print" style="color:#475569"></i></button>`;
+    if (ticket.status === 'Pendiente') {
+        actionButtons += `<button class="btn-status" onclick="updateStatusAE('${ticket.id}','Concluido','${ticket.type}')" title="Concluido"><i class="fa-solid fa-check" style="color:var(--status-concluido)"></i> Concluido</button>`;
+        actionButtons += `<button class="btn-status" onclick="updateStatusAE('${ticket.id}','Cancelado','${ticket.type}')" title="Cancelado"><i class="fa-solid fa-xmark" style="color:var(--status-cancelled)"></i> Cancelado</button>`;
     }
+    actionButtons += adminDeleteMarkup;
 
-    function renderImportPreview(data) {
-        const previewEl = document.getElementById('importPreview');
-        previewEl.style.display = 'block';
+    const extraDetail = ticket.type === 'Encargo' && ticket.phone
+        ? `<div><i class="fa-solid fa-phone" style="width:20px"></i> Contacto: <strong>${ticket.phone}</strong></div>`
+        : '';
 
-        let html = `<table>
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>SKU</th>
-                    <th>Nombre</th>
-                    <th>Categoría</th>
-                    <th>Costo</th>
-                    <th>Precio</th>
-                    <th>Stock</th>
-                    <th>Estado</th>
-                </tr>
-            </thead>
-            <tbody>`;
+    return `
+        <div class="ticket-card" data-status="${ticket.status}">
+            <div class="ticket-top">
+                <div class="ticket-info">
+                    <h3>${ticket.type} - ${ticket.client}</h3>
+                    <div style="display:flex; gap:1rem; margin-top:0.5rem; flex-wrap:wrap; font-size:0.85rem;">
+                        <span style="background:var(--bg-color); padding:0.2rem 0.5rem; border-radius:4px;"><i class="fa-solid fa-store" style="color:var(--primary-light)"></i> <strong>${ticket.tienda || 'N/A'}</strong></span>
+                        <span style="background:var(--bg-color); padding:0.2rem 0.5rem; border-radius:4px;"><i class="fa-solid fa-user-tag" style="color:var(--primary-light)"></i> <strong>${ticket.atendio || 'N/A'}</strong></span>
+                    </div>
+                    <div class="ticket-details">
+                        ${extraDetail}
+                        <div><i class="fa-solid fa-box" style="width:20px"></i> Equipo: <strong>${ticket.equipo || 'N/A'}</strong></div>
+                    </div>
+                    <div class="cobro-badge">
+                        <div>Total: <strong>$${ticket.totalCost}</strong> &bull; ${ticket.type === 'Apartado' ? 'Adelanto' : 'Anticipo'}: <strong>$${ticket.advanceCost}</strong></div>
+                        ${parseFloat(pendingCost) > 0 ? `<div style="margin-top:0.25rem;font-size:0.8rem;color:#ef4444;">Por cobrar: $${pendingCost}</div>` : `<div style="margin-top:0.25rem;font-size:0.8rem;color:#10b981;">Totalmente pagado</div>`}
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <div class="ticket-badge-status">${statusIcon} ${ticket.status}</div>
+                </div>
+            </div>
+            <div class="ticket-bottom" style="display:flex;justify-content:space-between;align-items:flex-end;">
+                <div class="ticket-date-area">
+                    <div class="ticket-date"><i class="fa-regular fa-calendar-plus"></i> Creado: <strong>${ticket.createdAt}</strong></div>
+                    ${ticket.completedAt ? `<div class="ticket-date" style="margin-top:0.25rem;color:${ticket.status === 'Concluido' ? 'var(--status-concluido)' : 'var(--status-cancelled)'}"><i class="fa-solid fa-flag-checkered"></i> Cerrado: <strong>${ticket.completedAt}</strong></div>` : ''}
+                </div>
+                <div class="ticket-actions">${actionButtons}</div>
+            </div>
+        </div>
+    `;
+}
 
-        data.forEach((item, idx) => {
-            const existing = products.find(p => p.sku.toLowerCase() === item.sku.toLowerCase());
-            const status = existing
-                ? '<span class="status-badge warning"><i class="fas fa-sync"></i> Actualizar</span>'
-                : '<span class="status-badge success"><i class="fas fa-plus"></i> Nuevo</span>';
+window.updateStatusAE = function(id, newStatus, type) {
+    const col = type === 'Apartado' ? apartados : encargos;
+    const dbCol = type === 'Apartado' ? 'apartados' : 'encargos';
+    const idx = col.findIndex(t => t.id === id);
+    if (idx !== -1) {
+        col[idx].status = newStatus;
+        col[idx].completedAt = new Date().toLocaleString();
+        setDoc(doc(db, dbCol, col[idx].id), col[idx]);
+    }
+};
 
-            html += `<tr>
-                <td>${idx + 1}</td>
-                <td>${item.sku}</td>
-                <td>${item.name}</td>
-                <td>${item.category}</td>
-                <td>${formatMoney(item.cost)}</td>
-                <td>${formatMoney(item.price)}</td>
-                <td>${item.stock}</td>
-                <td>${status}</td>
-            </tr>`;
+window.deleteTicketAE = function(id, type) {
+    if (!isAdmin()) return;
+    if (confirm('¿Eliminar este ticket?')) {
+        const dbCol = type === 'Apartado' ? 'apartados' : 'encargos';
+        deleteDoc(doc(db, dbCol, id));
+    }
+};
+
+window.printTicketAE = function(id, type) {
+    const col = type === 'Apartado' ? apartados : encargos;
+    const ticket = col.find(t => t.id === id);
+    if (!ticket) return;
+    const pending = (parseFloat(ticket.totalCost) - parseFloat(ticket.advanceCost)).toFixed(2);
+    const adelantoLabel = type === 'Apartado' ? 'Adelanto' : 'Anticipo';
+    const receiptHTML = `<html><head><title>Ticket ${ticket.id}</title>
+    <style>
+        @page{margin:0} body{font-family:'Courier New',monospace;width:300px;margin:0 auto;color:#000;background:#fff;font-size:14px;padding:10px;box-sizing:border-box;}
+        .header{text-align:center;margin-bottom:10px;} .header h1{font-size:18px;margin:0;font-weight:bold;} .header p{margin:2px 0;font-size:12px;}
+        .divider{border-bottom:1px dashed #000;margin:10px 0;} .flex-row{display:flex;justify-content:space-between;margin-bottom:5px;}
+        .item{text-align:left;margin-bottom:5px;word-wrap:break-word;} .total{font-weight:bold;font-size:16px;margin-top:10px;border-top:1px dashed #000;padding-top:5px;}
+        .footer{text-align:center;margin-top:20px;font-size:12px;}
+    </style></head>
+    <body onload="setTimeout(function(){window.print();},200);">
+        <div class="header"><h1>REALPHONE</h1><p>by Telcel</p><p>Sucursal: ${ticket.tienda||'N/A'}</p>
+        <p style="font-size:10px;">${ticket.tienda?(STORE_ADDRESSES[ticket.tienda]||''):''}</p>
+        <p>Ticket de ${ticket.type.toUpperCase()}</p><p>Fecha: ${ticket.createdAt}</p></div>
+        <div class="divider"></div>
+        <div class="item"><strong>Cliente:</strong> ${ticket.client}</div>
+        ${ticket.phone && type==='Encargo'?`<div class="item"><strong>Contacto:</strong> ${ticket.phone}</div>`:''}
+        <div class="item"><strong>Equipo:</strong> ${ticket.equipo||'N/A'}</div>
+        <div class="item"><strong>Atendió:</strong> ${ticket.atendio||'N/A'}</div>
+        <div class="item"><strong>Estado:</strong> ${ticket.status}</div>
+        <div class="divider"></div>
+        <div class="flex-row"><span>Costo Total:</span><span>$${ticket.totalCost}</span></div>
+        <div class="flex-row"><span>${adelantoLabel}:</span><span>$${ticket.advanceCost}</span></div>
+        <div class="flex-row total"><span>Restante:</span><span>$${parseFloat(pending)>0?pending:'0.00'}</span></div>
+        <div class="footer"><p>*** Gracias por su preferencia ***</p></div>
+    </body></html>`;
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:absolute;width:0;height:0;border:none;';
+    document.body.appendChild(iframe);
+    iframe.contentDocument.open(); iframe.contentDocument.write(receiptHTML); iframe.contentDocument.close();
+    setTimeout(() => { if (document.body.contains(iframe)) document.body.removeChild(iframe); }, 3000);
+};
+
+// Also extend the existing updateTicketStatus for Apartado/Encargo compatibility
+const _origUpdateTicketStatus = window.updateTicketStatus;
+window.updateTicketStatus = function(id, newStatus, type) {
+    if (type === 'Apartado' || type === 'Encargo') {
+        window.updateStatusAE(id, newStatus, type);
+    } else {
+        _origUpdateTicketStatus(id, newStatus, type);
+    }
+};
+
+// ==================== THEME SYSTEM ====================
+const THEME_KEY = 'realphone_theme';
+const btnThemeToggle = document.getElementById('btnThemeToggle');
+const themeDropdown = document.getElementById('themeDropdown');
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_KEY, theme);
+    // Mark active option
+    document.querySelectorAll('.theme-option').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.theme === theme);
+    });
+}
+
+// Load saved theme on start (default: light)
+applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+
+if (btnThemeToggle) {
+    btnThemeToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        themeDropdown.classList.toggle('hidden');
+    });
+}
+
+document.querySelectorAll('.theme-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+        applyTheme(btn.dataset.theme);
+        themeDropdown.classList.add('hidden');
+    });
+});
+
+document.addEventListener('click', (e) => {
+    if (themeDropdown && !themeDropdown.classList.contains('hidden')) {
+        if (!themeDropdown.contains(e.target) && e.target !== btnThemeToggle) {
+            themeDropdown.classList.add('hidden');
+        }
+    }
+});
+
+// ==================== NOVEDADES TOGGLE ====================
+const btnToggleNovedades = document.getElementById('btnToggleNovedades');
+const novedadesBody = document.getElementById('novedadesBody');
+const novedadesChevron = document.getElementById('novedadesChevron');
+const novedadesCard = novedadesBody?.closest('.novedades-card');
+const NOVEDADES_KEY = 'realphone_novedades_open';
+
+function initNovedades() {
+    const isOpen = localStorage.getItem(NOVEDADES_KEY) !== 'false';
+    if (!isOpen) {
+        novedadesBody?.classList.add('collapsed');
+        btnToggleNovedades?.classList.add('rotated');
+        novedadesCard?.classList.add('collapsed');
+    }
+}
+initNovedades();
+
+if (btnToggleNovedades) {
+    btnToggleNovedades.addEventListener('click', () => {
+        const isCollapsed = novedadesBody.classList.contains('collapsed');
+        novedadesBody.classList.toggle('collapsed', !isCollapsed);
+        btnToggleNovedades.classList.toggle('rotated', !isCollapsed);
+        novedadesCard?.classList.toggle('collapsed', !isCollapsed);
+        localStorage.setItem(NOVEDADES_KEY, isCollapsed ? 'true' : 'false');
+    });
+}
+
+// ==================== MENSAJE SECRETO ====================
+const SECRETO_KEY = '0305';
+const secretoHeaderTrigger = document.getElementById('secretoHeaderTrigger');
+const secretoBody = document.getElementById('secretoBody');
+const secretoCard = document.getElementById('secretoCard');
+const secretoGate = document.getElementById('secretoGate');
+const secretoCompose = document.getElementById('secretoCompose');
+const secretoKeyInput = document.getElementById('secretoKeyInput');
+const btnSecretoUnlock = document.getElementById('btnSecretoUnlock');
+const secretoError = document.getElementById('secretoError');
+const secretoMessages = document.getElementById('secretoMessages');
+const secretoMsgInput = document.getElementById('secretoMsgInput');
+const btnSecretoSend = document.getElementById('btnSecretoSend');
+const secretoTitleText = document.getElementById('secretoTitleText');
+const secretoLockIcon = document.getElementById('secretoLockIcon');
+const secretoChevron = document.getElementById('secretoChevron');
+
+let secretoUnlocked = false;
+
+// Firebase real-time listener — always active, renders for everyone
+// Messages auto-expire after 24 hours
+const SECRETO_TTL = 24 * 60 * 60 * 1000; // 1 day in ms
+
+let secretoMsgs = [];
+onSnapshot(collection(db, 'mensajes_secretos'), (snapshot) => {
+    const now = Date.now();
+    secretoMsgs = [];
+    snapshot.docs.forEach(d => {
+        const data = { id: d.id, ...d.data() };
+        // Auto-delete messages older than 24h
+        if (now - (data.timestamp || 0) > SECRETO_TTL) {
+            deleteDoc(doc(db, 'mensajes_secretos', d.id));
+        } else {
+            secretoMsgs.push(data);
+        }
+    });
+    secretoMsgs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    renderSecretoMessages();
+});
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function timeAgo(timestamp) {
+    const diff = Date.now() - timestamp;
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'ahora mismo';
+    if (mins < 60) return `hace ${mins} min`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `hace ${hrs}h`;
+    return 'hace 1 día';
+}
+
+function renderSecretoMessages() {
+    if (!secretoMessages) return;
+    if (secretoMsgs.length === 0) {
+        secretoMessages.innerHTML = `<div class="secreto-empty"><i class="fa-solid fa-ghost"></i>Aún no hay mensajes. ¡Sé el primero!</div>`;
+        return;
+    }
+    secretoMessages.innerHTML = secretoMsgs.map(m => `
+        <div class="secreto-msg-bubble">
+            ${escapeHtml(m.text)}
+            <div class="secreto-msg-meta">${timeAgo(m.timestamp || 0)} &mdash; expira en 24h</div>
+        </div>
+    `).join('');
+    secretoMessages.scrollTop = secretoMessages.scrollHeight;
+}
+
+// Toggle panel open/close
+if (secretoHeaderTrigger) {
+    secretoHeaderTrigger.addEventListener('click', () => {
+        const isOpen = !secretoBody.classList.contains('hidden');
+        secretoBody.classList.toggle('hidden', isOpen);
+        secretoCard.classList.toggle('open', !isOpen);
+        if (!isOpen) {
+            // Just opened — update title
+            secretoTitleText.textContent = secretoUnlocked ? 'Mensaje Secreto' : '· · ·';
+            renderSecretoMessages();
+        }
+    });
+}
+
+// Unlock write access with key
+function unlockSecreto() {
+    if (secretoKeyInput.value === SECRETO_KEY) {
+        secretoGate.classList.add('hidden');
+        secretoCompose?.classList.remove('hidden');
+        secretoCard.classList.add('unlocked');
+        secretoTitleText.textContent = 'Mensaje Secreto';
+        if (secretoLockIcon) secretoLockIcon.className = 'fa-solid fa-lock-open secreto-lock-icon';
+        secretoUnlocked = true;
+        secretoMsgInput?.focus();
+    } else {
+        secretoError?.classList.remove('hidden');
+        if (secretoKeyInput) secretoKeyInput.value = '';
+        if (secretoError) {
+            secretoError.style.animation = 'none';
+            void secretoError.offsetWidth;
+            secretoError.style.animation = '';
+        }
+        setTimeout(() => secretoError?.classList.add('hidden'), 2500);
+    }
+}
+
+if (btnSecretoUnlock) btnSecretoUnlock.addEventListener('click', unlockSecreto);
+if (secretoKeyInput) {
+    secretoKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlockSecreto(); });
+}
+
+// Send message (only when unlocked)
+function sendSecretoMessage() {
+    if (!secretoUnlocked) return;
+    const text = secretoMsgInput?.value.trim();
+    if (!text) return;
+    const msg = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+        text,
+        createdAt: new Date().toLocaleString(),
+        timestamp: Date.now()
+    };
+    setDoc(doc(db, 'mensajes_secretos', msg.id), msg);
+    if (secretoMsgInput) secretoMsgInput.value = '';
+}
+
+if (btnSecretoSend) btnSecretoSend.addEventListener('click', sendSecretoMessage);
+if (secretoMsgInput) {
+    secretoMsgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendSecretoMessage(); });
+}
+
+// initApp();
+
+// ==================== TESTER EDITOR ====================
+let testerQuill;
+function initTesterEditor() {
+    if (document.getElementById('testerEditor') && !testerQuill) {
+        testerQuill = new Quill('#testerEditor', {
+            theme: 'snow',
+            modules: { toolbar: '#testerEditorToolbar' }
+        });
+        
+        document.getElementById('btnTesterSearch').addEventListener('click', () => {
+            const query = document.getElementById('testerSearchInput').value;
+            if(query) {
+                document.getElementById('testerWebIframe').src = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+            }
         });
 
-        html += '</tbody></table>';
-        previewEl.innerHTML = html;
-    }
-
-    // Confirmar importación
-    document.getElementById('btnConfirmImport').addEventListener('click', function () {
-        if (pendingImportData.length === 0) {
-            showToast('No hay datos para importar', 'warning');
-            return;
-        }
-
-        let added   = 0;
-        let updated = 0;
-        let importedCount = 0;
-
-        pendingImportData.forEach(item => {
-            const existingIdx = products.findIndex(p => p.sku.toLowerCase() === item.sku.toLowerCase());
-
-            if (existingIdx >= 0) {
-                // Actualizar producto existente
-                products[existingIdx].name     = item.name;
-                products[existingIdx].category = item.category;
-                products[existingIdx].cost     = item.cost;
-                products[existingIdx].price    = item.price;
-                products[existingIdx].stock    = item.stock;
-                updated++;
-                importedCount++;
-            } else {
-                // Agregar nuevo producto
-                products.push({
-                    id:       generateId(),
-                    sku:      item.sku,
-                    name:     item.name,
-                    category: item.category,
-                    cost:     item.cost,
-                    price:    item.price,
-                    stock:    item.stock
-                });
-                added++;
-                importedCount++;
-            }
+        document.getElementById('btnSaveTesterContent').addEventListener('click', () => {
+            alert('Contenido guardado (simulación)');
         });
+    }
+}
+setTimeout(initTesterEditor, 1000);
 
-        if (importedCount > 0) {
-            saveData();
-            renderProducts(document.getElementById('searchInput').value);
-            renderCategoryTabs();
-            refreshCategorySelect();
-            if (window.refreshDeleteProductSelect) window.refreshDeleteProductSelect();
-            showToast(`✅ Importación completada: ${importedCount} productos agregados/actualizados`, 'success');
+// ==================== NOTIFICACIONES ====================
+const btnNotifyPayment = document.getElementById('btnNotifyPayment');
+if (btnNotifyPayment) {
+    btnNotifyPayment.addEventListener('click', () => {
+        const lastNotify = localStorage.getItem('last_notify_time');
+        const now = Date.now();
+        if (lastNotify && (now - parseInt(lastNotify)) < 15 * 60 * 1000) {
+            const minsLeft = Math.ceil((15 * 60 * 1000 - (now - parseInt(lastNotify))) / 60000);
+            alert(`Debes esperar ${minsLeft} minutos para volver a notificar.`);
+            return;
         }
         
-        resetImportState();
-    });
-
-    // Cancelar importación
-    document.getElementById('btnCancelImport').addEventListener('click', resetImportState);
-
-    // ==================== EXPORTACIÓN DE EXCEL ====================
-    // Selección de tipo de exportación
-    document.querySelectorAll('.export-option').forEach(opt => {
-        opt.addEventListener('click', function () {
-            document.querySelectorAll('.export-option').forEach(o => o.classList.remove('selected'));
-            this.classList.add('selected');
-            selectedExportType = this.dataset.type;
+        const username = currentUser1 ? currentUser1.username : 'Un cliente';
+        const notifId = Date.now().toString();
+        const notif = {
+            id: notifId,
+            message: `${username} ha notificado de un pago pendiente.`,
+            timestamp: Date.now(),
+            store: currentStore,
+            read: false
+        };
+        
+        setDoc(doc(db, "notificaciones", notifId), notif).then(() => {
+            localStorage.setItem('last_notify_time', now.toString());
+            alert("Notificación enviada al administrador.");
+        }).catch(e => {
+            alert("Error al notificar: " + e.message);
         });
     });
+}
 
-    document.getElementById('btnExport').addEventListener('click', function () {
-        if (typeof XLSX === 'undefined') {
-            showToast('Error: Librería SheetJS no cargada', 'error');
-            return;
-        }
-
-        let wsData = [];
-        const now = new Date();
-        const dateStr = now.toISOString().slice(0, 10);
-
-        switch (selectedExportType) {
-            case 'full':
-                wsData = products.map((p, idx) => ({
-                    '#':          idx + 1,
-                    'SKU':        p.sku,
-                    'Nombre':     p.name,
-                    'Categoría':  p.category,
-                    'Costo':      p.cost,
-                    'Precio':     p.price,
-                    'Stock':      p.stock,
-                    'Margen':     p.price - p.cost,
-                    'Valor_Stock': p.price * p.stock
-                }));
-                break;
-
-            case 'stock':
-                wsData = products.map((p, idx) => ({
-                    '#':      idx + 1,
-                    'SKU':    p.sku,
-                    'Nombre': p.name,
-                    'Stock':  p.stock,
-                    'Valor':  p.price * p.stock
-                }));
-                break;
-
-            case 'template':
-                wsData = [
-                    { SKU: 'FUNDA-EJ', Nombre: 'Funda Genérica para Celular', Categoría: 'fundas', Costo: 30, Precio: 99, Stock: 50 },
-                    { SKU: 'MICA-EJ', Nombre: 'Mica Normal Cristal Templado', Categoría: 'micas', Costo: 15, Precio: 49, Stock: 100 }
-                ];
-                break;
-        }
-
-        if (wsData.length === 0) {
-            showToast('No hay datos para exportar', 'warning');
-            return;
-        }
-
-        try {
-            const ws = XLSX.utils.json_to_sheet(wsData);
-            const wb = XLSX.utils.book_new();
-
-            // Ajustar ancho de columnas
-            const colWidths = Object.keys(wsData[0]).map(key => ({
-                wch: Math.max(key.length, ...wsData.map(row => String(row[key] || '').length)) + 2
-            }));
-            ws['!cols'] = colWidths;
-
-            const sheetNames = {
-                full:     'Inventario_Completo',
-                stock:    'Stock',
-                template: 'Plantilla'
-            };
-
-            XLSX.utils.book_append_sheet(wb, ws, sheetNames[selectedExportType] || 'Datos');
-
-            const fileName = `RealPhone_POS_${sheetNames[selectedExportType]}_${dateStr}.xlsx`;
-            XLSX.writeFile(wb, fileName);
-
-            showToast('📥 Archivo descargado: ' + fileName, 'success');
-        } catch (err) {
-            console.error('Error exportando:', err);
-            showToast('Error al exportar: ' + err.message, 'error');
+// Escuchar notificaciones
+let initialLoadNotif = true;
+onSnapshot(collection(db, "notificaciones"), (snapshot) => {
+    if (initialLoadNotif) {
+        initialLoadNotif = false;
+        return;
+    }
+    snapshot.docChanges().forEach((change) => {
+        if (change.type === "added") {
+            const notif = change.doc.data();
+            if (isAdmin()) {
+                alert(`🔔 NUEVA NOTIFICACIÓN: ${notif.message}`);
+            }
         }
     });
+});
 
-    // ==================== ATAJOS DE TECLADO ====================
-    let shortcutPanelVisible = false;
-
-    function toggleShortcutPanel() {
-        shortcutPanelVisible = !shortcutPanelVisible;
-        shortcutPanel.classList.toggle('visible', shortcutPanelVisible);
-    }
-
-    document.addEventListener('keydown', function (e) {
-        // Permitir '?' incluso sin sesión para ver atajos
-        if (e.key === '?' && !isTyping(e)) {
-            e.preventDefault();
-            toggleShortcutPanel();
-            return;
-        }
-
-        // Cerrar modal/panel con Escape
-        if (e.key === 'Escape') {
-            const servicesModal = document.getElementById('servicesModal');
-            if (servicesModal && servicesModal.classList.contains('active')) {
-                if (window.closeServicesModal) window.closeServicesModal();
-                e.preventDefault();
-                return;
+// Setup Capacitor Push Notifications (Admin)
+async function setupPushNotifications() {
+    if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+        const PushNotifications = window.Capacitor.Plugins.PushNotifications;
+        if (PushNotifications) {
+            let permStatus = await PushNotifications.checkPermissions();
+            if (permStatus.receive === 'prompt') {
+                permStatus = await PushNotifications.requestPermissions();
             }
-            if (inventoryModal.classList.contains('active')) {
-                closeInventoryModal();
-                e.preventDefault();
-                return;
-            }
-            if (shortcutPanelVisible) {
-                toggleShortcutPanel();
-                e.preventDefault();
-                return;
-            }
-        }
-
-        if (!currentUser) return; // Solo si hay sesión activa
-
-        // No interceptar atajos si el usuario está escribiendo en un input/textarea
-        // EXCEPTO para las teclas de función
-        const isFKey = /^F\d{1,2}$/.test(e.key);
-
-        if (!isFKey && isTyping(e)) return;
-
-        switch (e.key) {
-            case 'F3':
-                e.preventDefault();
-                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'tester')) {
-                    showToast('F3: Registrar salida de inventario', 'info');
-                } else {
-                    showToast('⛔ Solo administradores pueden registrar salidas', 'error');
-                }
-                break;
-            case 'F4':
-                e.preventDefault();
-                const btnCorte = document.getElementById('btnCorte');
-                if (btnCorte) btnCorte.click();
-                break;
-            case 'F5':
-                e.preventDefault();
-                if (ticketItems.length > 0) {
-                    const lastItem = ticketItems[ticketItems.length - 1];
-                    const newQty = prompt('Cambiar cantidad de "' + lastItem.name + '":\nCantidad actual: ' + lastItem.qty, lastItem.qty);
-                    if (newQty !== null) {
-                        const q = parseInt(newQty);
-                        if (!isNaN(q) && q > 0 && q <= lastItem.stock) {
-                            lastItem.qty = q;
-                            updateTicketDisplay();
-                            showToast('Cantidad actualizada: ' + lastItem.name + ' → ' + q, 'success');
-                        } else if (q <= 0) {
-                            showToast('La cantidad debe ser mayor a 0', 'warning');
-                        } else {
-                            showToast('Stock insuficiente (máx: ' + lastItem.stock + ')', 'warning');
-                        }
-                    }
-                } else {
-                    showToast('No hay productos en el ticket para cambiar', 'warning');
-                }
-                break;
-            case 'F6':
-                e.preventDefault();
-                document.getElementById('btnPendiente').click();
-                break;
-            case 'F7':
-                e.preventDefault();
-                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'tester')) {
-                    handleStockEntry();
-                } else {
-                    showToast('⛔ Solo administradores pueden registrar entradas', 'error');
-                }
-                break;
-            case 'F2':
-                e.preventDefault();
-                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'tester')) {
-                    document.getElementById('btnAddProduct').click();
-                } else {
-                    showToast('⛔ Solo administradores pueden añadir productos', 'error');
-                }
-                break;
-            case 'F8':
-                e.preventDefault();
-                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'tester')) {
-                    openInventoryModal();
-                } else {
-                    showToast('⛔ Solo administradores pueden abrir el inventario', 'error');
-                }
-                break;
-            case 'F9':
-                e.preventDefault();
-                handlePriceCheck();
-                break;
-            case 'F10':
-                e.preventDefault();
-                document.getElementById('btnBuscar').click();
-                break;
-            case 'F11':
-                e.preventDefault();
-                if (window.openServicesModal) {
-                    const gestor = document.getElementById('gestorContainer');
-                    if (gestor && gestor.style.display !== 'none') {
-                        window.closeServicesModal();
-                    } else {
-                        window.openServicesModal();
-                    }
-                }
-                break;
-            case 'F12':
-                e.preventDefault();
-                document.getElementById('btnCobrar').click();
-                break;
-            case 'Delete':
-                if (!isTyping(e)) {
-                    e.preventDefault();
-                    document.getElementById('btnDeleteItem').click();
-                }
-                break;
-        }
-    });
-
-    function isTyping(e) {
-        const tag = (e.target || e.srcElement).tagName;
-        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
-    }
-
-    // ==================== FUNCIONES DE ATAJOS ====================
-    function handleStockEntry() {
-        const sku = prompt('🔹 Entrada de inventario\nIngresa el SKU del producto:');
-        if (!sku) return;
-
-        const product = products.find(p => p.sku.toLowerCase() === sku.toLowerCase());
-        if (!product) {
-            showToast('Producto no encontrado: ' + sku, 'error');
-            return;
-        }
-
-        const qty = parseInt(prompt('Producto: ' + product.name + '\nStock actual: ' + product.stock + '\n\nCantidad a agregar:'));
-        if (isNaN(qty) || qty <= 0) {
-            showToast('Cantidad no válida', 'warning');
-            return;
-        }
-
-        product.stock += qty;
-        saveData();
-        renderProducts(searchInput.value);
-        showToast('✅ Entrada registrada: +' + qty + ' unidades de ' + product.name + ' (Stock: ' + product.stock + ')', 'success');
-    }
-
-    function handlePriceCheck() {
-        const sku = prompt('🔍 Verificador de Precios\nIngresa SKU o nombre del producto:');
-        if (!sku) return;
-
-        const product = products.find(p =>
-            p.sku.toLowerCase() === sku.toLowerCase() ||
-            p.name.toLowerCase().includes(sku.toLowerCase())
-        );
-
-        if (!product) {
-            showToast('Producto no encontrado: ' + sku, 'error');
-            return;
-        }
-
-        alert(
-            '📋 VERIFICADOR DE PRECIOS\n' +
-            '━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-            'SKU: ' + product.sku + '\n' +
-            'Nombre: ' + product.name + '\n' +
-            'Categoría: ' + product.category + '\n' +
-            'Precio: ' + formatMoney(product.price) + '\n' +
-            'Costo: ' + formatMoney(product.cost) + '\n' +
-            'Margen: ' + formatMoney(product.price - product.cost) + '\n' +
-            'Stock: ' + product.stock + ' unidades'
-        );
-    }
-
-
-    // ==================== AGREGAR CATEGORÍA ====================
-    const addCategoryForm = document.getElementById('addCategoryForm');
-    if (addCategoryForm) {
-        addCategoryForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            const idVal   = document.getElementById('newCategoryId').value.trim().toLowerCase().replace(/\s+/g, '_');
-            const nameVal = document.getElementById('newCategoryName').value.trim();
-            if (!idVal || !nameVal) { showToast('Completa ambos campos', 'warning'); return; }
-            if (categories.find(c => c.id === idVal)) {
-                showToast('Ya existe una categoría con esa clave: ' + idVal, 'error'); return;
-            }
-            categories.push({ id: idVal, name: nameVal });
-            saveData();
-            renderCategoryTabs();
-            refreshCategorySelect();
-            renderCategoriesList();
-            this.reset();
-            showToast('Categoría "' + nameVal + '" agregada', 'success');
-        });
-    }
-
-    // ==================== ELIMINAR PRODUCTO ====================
-    const deleteProductSelect = document.getElementById('deleteProductSelect');
-    const btnDeleteSelectedProduct = document.getElementById('btnDeleteSelectedProduct');
-    
-    window.refreshDeleteProductSelect = function() {
-        if (!deleteProductSelect) return;
-        deleteProductSelect.innerHTML = '<option value="">Selecciona un producto...</option>' + 
-            products.map(p => `<option value="${p.id}">${p.sku} - ${p.name}</option>`).join('');
-    };
-
-    if (btnDeleteSelectedProduct && deleteProductSelect) {
-        btnDeleteSelectedProduct.addEventListener('click', function() {
-            const id = deleteProductSelect.value;
-            if (!id) {
-                showToast('Selecciona un producto para eliminar', 'warning');
-                return;
-            }
-            const prod = products.find(p => p.id === id);
-            if (!prod) return;
-            
-            if (confirm(`¿Estás completamente seguro de eliminar "${prod.name}" del sistema de forma permanente?`)) {
-                products = products.filter(p => p.id !== id);
-                saveData();
-                renderProducts(document.getElementById('searchInput') ? document.getElementById('searchInput').value : '');
-                window.refreshDeleteProductSelect();
-                showToast('Producto eliminado permanentemente', 'success');
-            }
-        });
-    }
-
-    // ==================== TEMA GLOBAL ====================
-    (function initTheme() {
-        const THEME_KEY = 'realphone_theme';
-        const themeNames = { light: '☀️ Claro', dark: '🌙 Oscuro', blue: '🌊 Azul Noche', emerald: '🌿 Esmeralda' };
-        const saved = localStorage.getItem(THEME_KEY) || 'light';
-        applyTheme(saved);
-
-        function applyTheme(theme) {
-            document.documentElement.setAttribute('data-theme', theme);
-            document.body.setAttribute('data-theme', theme);
-            localStorage.setItem(THEME_KEY, theme);
-            // Actualizar botón
-            const lbl = document.getElementById('globalThemeBtnLabel');
-            if (lbl) lbl.textContent = themeNames[theme] || 'Tema';
-            // Marcar opción activa
-            document.querySelectorAll('.theme-opt').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.theme === theme);
-            });
-        }
-
-        const btn = document.getElementById('globalThemeBtn');
-        const dropdown = document.getElementById('globalThemeDropdown');
-        if (btn && dropdown) {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                dropdown.classList.toggle('open');
-            });
-            document.addEventListener('click', () => dropdown.classList.remove('open'));
-            dropdown.addEventListener('click', (e) => {
-                const opt = e.target.closest('.theme-opt');
-                if (!opt) return;
-                applyTheme(opt.dataset.theme);
-                dropdown.classList.remove('open');
-            });
-        }
-    })();
-
-    // ==================== INICIALIZACIÓN ====================
-    loadData();
-    console.log('Sistema RealPhone POS inicializado');
-    console.log('Usuarios cargados:', users.length);
-    console.log('Productos cargados:', products.length);
-    console.log('Categorías cargadas:', categories.length);
-
-    renderCategoryTabs();
-    refreshCategorySelect();
-    if (window.refreshDeleteProductSelect) window.refreshDeleteProductSelect();
-    renderProducts();
-    updateTicketDisplay();
-
-    // ==================== GESTOR DE TICKETS (INTEGRACIÓN) ====================
-    window.openServicesModal = function() {
-        const gestor = document.getElementById('gestorContainer');
-        const pos = document.getElementById('posContainer');
-        if (gestor && pos) {
-            pos.style.display = 'none';
-            gestor.style.display = 'flex';
-        }
-    };
-
-    window.closeServicesModal = function() {
-        const gestor = document.getElementById('gestorContainer');
-        const pos = document.getElementById('posContainer');
-        if (gestor && gestor.style.display !== 'none') {
-            gestor.style.display = 'none';
-            pos.style.display = 'flex';
-            if (searchInput) searchInput.focus();
-        }
-    };
-
-    const btnToggleGestor = document.getElementById('btnToggleGestor');
-    if (btnToggleGestor) btnToggleGestor.addEventListener('click', window.openServicesModal);
-
-    // ==================== CÓMO USAR (AYUDA) ====================
-    const helpModal = document.getElementById('helpModal');
-    const btnHelpSystem = document.getElementById('btnHelpSystem');
-    const btnCloseHelp = document.getElementById('btnCloseHelp');
-    const btnReadHelp = document.getElementById('btnReadHelp');
-
-    if (btnHelpSystem) {
-        btnHelpSystem.addEventListener('click', () => {
-            if (helpModal) helpModal.style.display = 'flex';
-        });
-    }
-    
-    if (btnCloseHelp) {
-        btnCloseHelp.addEventListener('click', () => {
-            if (helpModal) helpModal.style.display = 'none';
-            if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-        });
-    }
-    // Forzar carga de voces (necesario en Chrome/Edge)
-    if ('speechSynthesis' in window) {
-        window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-        window.speechSynthesis.getVoices();
-    }
-
-    if (btnReadHelp) {
-        btnReadHelp.addEventListener('click', () => {
-            if (!('speechSynthesis' in window)) {
-                showToast('Tu navegador no soporta lectura en voz alta', 'error');
-                return;
-            }
-            
-            const textToRead = document.getElementById('helpContentText').innerText;
-            const utterance = new SpeechSynthesisUtterance(textToRead);
-            utterance.lang = 'es-MX';
-            
-            let voices = window.speechSynthesis.getVoices();
-            if (voices.length === 0) {
-                // Si aún no cargan las voces, el navegador usará la voz predeterminada del sistema
-                console.warn('Las voces aún no cargan, usando voz predeterminada.');
-            } else {
-                const zephyrVoice = voices.find(v => v.name.toLowerCase().includes('zephyr'));
-                if (zephyrVoice) {
-                    utterance.voice = zephyrVoice;
-                } else {
-                    const esVoice = voices.find(v => v.lang.startsWith('es'));
-                    if (esVoice) utterance.voice = esVoice;
-                }
-            }
-            
-            window.speechSynthesis.cancel();
-            
-            // Timeout pequeño para asegurar que el cancel() se procese
-            setTimeout(() => {
-                window.speechSynthesis.speak(utterance);
-            }, 50);
-        });
-    }
-
-    // ==================== IMPRESIÓN DE TICKETS ====================
-    function getStoreAddress() {
-        return currentBranch && STORE_ADDRESSES[currentBranch] ? STORE_ADDRESSES[currentBranch] : '';
-    }
-
-    function printTicketHTML(content) {
-        const printWindow = window.open('', '_blank', 'width=400,height=600');
-        if (!printWindow) {
-            showToast('Permite las ventanas emergentes para imprimir tickets', 'warning');
-            return;
-        }
-        printWindow.document.write(`
-            <html>
-            <head>
-                <style>
-                    body { font-family: 'Courier New', monospace; padding: 10px; margin: 0 auto; color: black; font-size: 14px; width: 300px; box-sizing: border-box; }
-                    .header { text-align: center; margin-bottom: 10px; }
-                    .header h1 { font-size: 18px; margin: 0; font-weight: bold; }
-                    .header p { margin: 2px 0; font-size: 12px; }
-                    .text-center { text-align: center; }
-                    .text-right { text-align: right; }
-                    .font-bold { font-weight: bold; }
-                    .mb { margin-bottom: 10px; }
-                    .divider { border-bottom: 1px dashed black; margin: 10px 0; }
-                    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 14px; }
-                    th, td { padding: 4px 0; }
-                    @media print { body { margin: 0; } }
-                </style>
-            </head>
-            <body>
-                ${content}
-                <div class="divider"></div>
-                <div class="text-center" style="font-size: 12px; margin-top: 20px;"><p>*** Gracias por su preferencia ***</p></div>
-            </body>
-            </html>
-        `);
-        printWindow.document.close();
-        printWindow.focus();
-        setTimeout(() => {
-            printWindow.print();
-            printWindow.close();
-        }, 300);
-    }
-
-    function printSaleTicket(sale, ticketNum) {
-        let itemsHtml = sale.items.map(i => `
-            <tr>
-                <td>${i.qty}x ${i.name.substring(0,18)}</td>
-                <td class="text-right">${formatMoney(i.price)}</td>
-                <td class="text-right">${formatMoney(i.price * i.qty)}</td>
-            </tr>
-        `).join('');
-
-        const content = `
-            <div class="header">
-                <h1>REALPHONE</h1>
-                <p>by Telcel</p>
-                <p>Sucursal: ${sale.branch || 'N/A'}</p>
-                <p style="font-size:10px;">${getStoreAddress()}</p>
-                <p>Ticket de VENTA #${ticketNum}</p>
-                <p>Fecha: ${sale.date} ${sale.time}</p>
-            </div>
-            <div class="divider"></div>
-            <div style="margin-bottom: 5px;"><strong>Cajero:</strong> ${sale.cashier}</div>
-            <div class="divider"></div>
-            <table>
-                <tr><th style="text-align:left">Cant/Art</th><th class="text-right">P.U.</th><th class="text-right">Importe</th></tr>
-                ${itemsHtml}
-            </table>
-            <div class="divider"></div>
-            <div class="text-right font-bold" style="font-size: 16px;">TOTAL: ${formatMoney(sale.total)}</div>
-            <div class="text-right">Pago con: ${formatMoney(sale.payment)}</div>
-            <div class="text-right">Cambio: ${formatMoney(sale.change)}</div>
-        `;
-        printTicketHTML(content);
-    }
-
-    // ==================== CORTE DE CAJA ====================
-    const corteModal = document.getElementById('corteModal');
-    const btnCorte = document.getElementById('btnCorte');
-    const btnCloseCorte = document.getElementById('btnCloseCorte');
-    
-    const corteTotalSales = document.getElementById('corteTotalSales');
-    const corteTotalItems = document.getElementById('corteTotalItems');
-    const corteTotalProfit = document.getElementById('corteTotalProfit');
-
-    function calculateCorte() {
-        let totalSales = 0;
-        let totalItems = 0;
-        let totalProfit = 0;
-
-        salesHistory.forEach(sale => {
-            totalSales += sale.total;
-            totalProfit += sale.profit || 0;
-            sale.items.forEach(item => {
-                totalItems += item.qty;
-            });
-        });
-
-        return { totalSales, totalItems, totalProfit };
-    }
-
-    function openCorteModal() {
-        const totals = calculateCorte();
-        if (corteTotalSales) corteTotalSales.textContent = formatMoney(totals.totalSales);
-        if (corteTotalItems) corteTotalItems.textContent = totals.totalItems;
-        if (corteTotalProfit) corteTotalProfit.textContent = formatMoney(totals.totalProfit);
-        if (corteModal) corteModal.classList.add('active');
-    }
-
-    if (btnCorte) btnCorte.addEventListener('click', openCorteModal);
-    if (btnCloseCorte) btnCloseCorte.addEventListener('click', () => corteModal.classList.remove('active'));
-
-    function printCorteTicket(totals, isCompleto) {
-        const tipo = isCompleto ? "CORTE COMPLETO (Z)" : "CORTE PARCIAL (X)";
-        const date = new Date().toLocaleString();
-
-        let ticketsListHtml = '';
-        if (salesHistory.length > 0) {
-            ticketsListHtml += '<tr><td colspan="2"><div class="divider" style="margin: 5px 0;"></div></td></tr>';
-            ticketsListHtml += '<tr><td colspan="2" style="font-weight:bold; text-align:center;">Detalle de Ventas (Tickets)</td></tr>';
-            
-            salesHistory.forEach((sale, index) => {
-                const num = index + 1;
-                ticketsListHtml += `<tr><td>Ticket-${num.toString().padStart(3, '0')}:</td><td class="text-right">${formatMoney(sale.total)}</td></tr>`;
-            });
-
-            ticketsListHtml += '<tr><td colspan="2"><div class="divider" style="margin: 5px 0;"></div></td></tr>';
-            ticketsListHtml += '<tr><td colspan="2" style="font-weight:bold; text-align:center;">Artículos Vendidos</td></tr>';
-            
-            let soldItems = {};
-            salesHistory.forEach(sale => {
-                sale.items.forEach(item => {
-                    if (!soldItems[item.id]) {
-                        soldItems[item.id] = { name: item.name, qty: 0, total: 0 };
-                    }
-                    soldItems[item.id].qty += item.qty;
-                    soldItems[item.id].total += (item.price * item.qty);
+            if (permStatus.receive === 'granted') {
+                await PushNotifications.register();
+                
+                PushNotifications.addListener('registration', token => {
+                    console.log('Push registration token: ' + token.value);
                 });
-            });
-            
-            Object.values(soldItems).forEach(item => {
-                ticketsListHtml += `<tr><td>${item.qty}x ${item.name.substring(0,18)}</td><td class="text-right">${formatMoney(item.total)}</td></tr>`;
-            });
+                
+                PushNotifications.addListener('pushNotificationReceived', notification => {
+                    alert(`Push: ${notification.title} - ${notification.body}`);
+                });
+            }
+        }
+    }
+}
+
+setTimeout(() => {
+    if (isAdmin()) {
+        setupPushNotifications();
+    }
+}, 2000);
+
+// ==================== EDITOR VISUAL GLOBAL ====================
+let isVisualEditMode = false;
+let currentEditTarget = null;
+let currentEditSelector = null;
+let uiOverrides = {};
+
+const fabEditMode = document.getElementById('fabEditMode');
+const visualEditorModal = document.getElementById('visualEditorModal');
+const btnCloseVisualEditor = document.getElementById('btnCloseVisualEditor');
+const visualEditorTextMode = document.getElementById('visualEditorTextMode');
+const visualEditorImageMode = document.getElementById('visualEditorImageMode');
+const visualEditorTextInput = document.getElementById('visualEditorTextInput');
+const visualEditorImageInput = document.getElementById('visualEditorImageInput');
+const btnSaveVisualOverride = document.getElementById('btnSaveVisualOverride');
+
+function getCssSelector(el) {
+    if (el.id) return `#${el.id}`;
+    let path = [];
+    while (el.nodeType === Node.ELEMENT_NODE && el.tagName !== 'HTML') {
+        let selector = el.nodeName.toLowerCase();
+        if (el.id) {
+            selector += '#' + el.id;
+            path.unshift(selector);
+            break;
+        } else {
+            let sib = el, nth = 1;
+            while (sib = sib.previousElementSibling) {
+                if (sib.nodeName.toLowerCase() == selector) nth++;
+            }
+            if (nth != 1) selector += ":nth-of-type("+nth+")";
+        }
+        path.unshift(selector);
+        el = el.parentNode;
+    }
+    return path.join(" > ");
+}
+
+if (fabEditMode) {
+    fabEditMode.addEventListener('click', () => {
+        isVisualEditMode = !isVisualEditMode;
+        if (isVisualEditMode) {
+            document.body.classList.add('edit-mode-active');
+            fabEditMode.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+            fabEditMode.style.backgroundColor = 'var(--status-cancelled)';
+        } else {
+            document.body.classList.remove('edit-mode-active');
+            fabEditMode.innerHTML = '<i class="fa-solid fa-pen-ruler"></i>';
+            fabEditMode.style.backgroundColor = 'var(--primary-color)';
+        }
+    });
+}
+
+document.body.addEventListener('click', (e) => {
+    if (!isVisualEditMode) return;
+    
+    // Ignorar clics en el FAB o dentro del modal del editor
+    if (e.target.closest('#fabEditMode') || e.target.closest('#visualEditorModal')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    currentEditTarget = e.target;
+    currentEditSelector = getCssSelector(currentEditTarget);
+
+    const isIcon = currentEditTarget.tagName === 'I' || currentEditTarget.tagName === 'IMG';
+    
+    visualEditorTextMode.classList.add('hidden');
+    visualEditorImageMode.classList.add('hidden');
+
+    if (isIcon) {
+        visualEditorImageMode.classList.remove('hidden');
+        if (currentEditTarget.tagName === 'IMG') {
+            visualEditorImageInput.value = currentEditTarget.src;
+        } else {
+            visualEditorImageInput.value = currentEditTarget.className;
+        }
+    } else {
+        visualEditorTextMode.classList.remove('hidden');
+        visualEditorTextInput.value = currentEditTarget.innerText;
+    }
+
+    visualEditorModal.classList.remove('hidden');
+});
+
+if (btnCloseVisualEditor) {
+    btnCloseVisualEditor.addEventListener('click', () => {
+        visualEditorModal.classList.add('hidden');
+    });
+}
+
+if (btnSaveVisualOverride) {
+    btnSaveVisualOverride.addEventListener('click', () => {
+        if (!currentEditSelector) return;
+        
+        let overrideValue = "";
+        let overrideType = "text";
+
+        if (!visualEditorTextMode.classList.contains('hidden')) {
+            overrideValue = visualEditorTextInput.value;
+        } else {
+            overrideValue = visualEditorImageInput.value;
+            overrideType = currentEditTarget.tagName === 'IMG' ? 'img' : 'icon';
         }
 
-        const cashierName = currentUser ? (currentUser.username || currentUser.fullName) : 'Admin';
-        const coworkerName = currentUser2 ? ' / ' + (currentUser2.username || currentUser2.fullName) : '';
+        const overrideId = btoa(encodeURIComponent(currentEditSelector)).replace(/=/g, '');
+        const overrideDoc = {
+            selector: currentEditSelector,
+            type: overrideType,
+            value: overrideValue,
+            timestamp: Date.now()
+        };
 
-        const content = `
-            <div class="header">
-                <h1>REALPHONE</h1>
-                <p>by Telcel</p>
-                <p>Sucursal: ${currentBranch || 'N/A'}</p>
-                <p style="font-size:10px;">${getStoreAddress()}</p>
-                <p style="font-weight:bold; margin-top: 5px;">${tipo}</p>
-                <p>Fecha: ${date}</p>
-            </div>
-            <div class="divider"></div>
-            <div style="margin-bottom: 5px;"><strong>En turno:</strong> ${cashierName}${coworkerName}</div>
-            <div class="divider"></div>
-            <table>
-                <tr><td>Ventas Realizadas:</td><td class="text-right font-bold">${salesHistory.length}</td></tr>
-                <tr><td>Artículos Vendidos:</td><td class="text-right">${totals.totalItems}</td></tr>
-                <tr><td>Ganancia Estimada:</td><td class="text-right">${formatMoney(totals.totalProfit)}</td></tr>
-                ${ticketsListHtml}
-                <tr><td colspan="2"><div class="divider" style="margin: 5px 0;"></div></td></tr>
-                <tr><td class="font-bold" style="font-size: 16px;">TOTAL EN CAJA:</td><td class="text-right font-bold" style="font-size: 16px;">${formatMoney(totals.totalSales)}</td></tr>
-            </table>
-        `;
-        printTicketHTML(content);
-    }
-
-    const btnCorteParcial = document.getElementById('btnCorteParcial');
-    if (btnCorteParcial) {
-        btnCorteParcial.addEventListener('click', function() {
-            const totals = calculateCorte();
-            printCorteTicket(totals, false);
-            showToast('Corte Parcial impreso', 'info');
+        setDoc(doc(db, "ui_overrides", overrideId), overrideDoc).then(() => {
+            visualEditorModal.classList.add('hidden');
+            // Aplicar inmediatamente al elemento
+            applyOverrideToElement(currentEditTarget, overrideDoc);
+        }).catch(e => {
+            alert("Error al guardar: " + e.message);
         });
+    });
+}
+
+// Cargar overrides y aplicarlos
+onSnapshot(collection(db, "ui_overrides"), (snapshot) => {
+    snapshot.docChanges().forEach((change) => {
+        const data = change.doc.data();
+        if (change.type === "added" || change.type === "modified") {
+            uiOverrides[data.selector] = data;
+            applyOverrideBySelector(data.selector, data);
+        }
+        if (change.type === "removed") {
+            delete uiOverrides[data.selector];
+            // No revertimos dinámicamente para simplificar, se requeriría recargar.
+        }
+    });
+});
+
+function applyOverrideToElement(el, data) {
+    if (data.type === 'text') {
+        // Evitamos reemplazar HTML interno si tiene hijos (como íconos) y solo modificamos el text node principal
+        // Para simplificar, si es texto, solo cambiamos el textContent, pero si tenía íconos se pueden perder.
+        // Si el elemento contiene otros elementos, tratamos de reemplazar solo los nodos de texto.
+        if (el.children.length === 0) {
+            el.innerText = data.value;
+        } else {
+            // Reemplazo simple (puede romper estilos internos si se editó un contenedor complejo)
+            el.innerHTML = data.value; 
+        }
+    } else if (data.type === 'icon') {
+        el.className = data.value;
+    } else if (data.type === 'img') {
+        el.src = data.value;
     }
+}
 
-    const btnCorteCompleto = document.getElementById('btnCorteCompleto');
-    if (btnCorteCompleto) {
-        btnCorteCompleto.addEventListener('click', function() {
-            const totals = calculateCorte();
-            if (confirm('¿ESTÁS SEGURO DE HACER CORTE COMPLETO?\\n\\nSe reiniciarán las ventas a $0.00.\\nEl ticket se imprimirá a continuación.')) {
-                printCorteTicket(totals, true);
-                salesHistory = [];
-                saveData();
-                showToast('✅ Corte Completo realizado. Caja en $0.00', 'success');
-                corteModal.classList.remove('active');
-            }
-        });
+function applyOverrideBySelector(selector, data) {
+    const elements = document.querySelectorAll(selector);
+    elements.forEach(el => applyOverrideToElement(el, data));
+}
+
+// MutationObserver para aplicar a elementos renderizados dinámicamente (ej. nuevas facturas)
+const observer = new MutationObserver((mutations) => {
+    let shouldApply = false;
+    for (let m of mutations) {
+        if (m.addedNodes.length > 0) {
+            shouldApply = true;
+            break;
+        }
     }
+    if (shouldApply) {
+        for (const selector in uiOverrides) {
+            applyOverrideBySelector(selector, uiOverrides[selector]);
+        }
+    }
+});
+observer.observe(document.body, { childList: true, subtree: true });
 
-    // ==================== FIREBASE AUTH SYNC ====================
-    import("https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js").then(({ initializeApp }) => {
-        import("https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js").then(({ getFirestore, collection, onSnapshot }) => {
-            try {
-                const firebaseConfig = {
-                    apiKey: "AIzaSyAziX2ZYthQ6jMN9t5KoEk1qb88ZT29OMU",
-                    authDomain: "realphone-tickets.firebaseapp.com",
-                    projectId: "realphone-tickets",
-                    storageBucket: "realphone-tickets.firebasestorage.app",
-                    messagingSenderId: "461224250452",
-                    appId: "1:461224250452:web:9d2ed52a0e880c3e45f1c1"
-                };
-                const app = initializeApp(firebaseConfig);
-                const db = getFirestore(app);
-                onSnapshot(collection(db, "users"), (snapshot) => {
-                    const fbUsers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    if (fbUsers.length > 0) {
-                        users = fbUsers.map(u => ({
-                            id: u.id,
-                            username: u.username,
-                            password: u.password,
-                            role: u.role,
-                            fullName: u.username, 
-                            branch: 'principal',
-                            active: true
-                        }));
-                        localStorage.setItem('realphone_users', JSON.stringify(users));
-                        console.log("Usuarios sincronizados desde Firebase");
-                    }
-                });
-            } catch(e) {
-                console.error("Error inicializando Firebase:", e);
-            }
-        }).catch(e => console.error("Error importando firestore", e));
-    }).catch(e => console.error("Error importando firebase-app", e));
+// Mostrar FAB si es tester
+function updateTesterUI() {
+    if (isTester() && fabEditMode) {
+        fabEditMode.classList.remove('hidden');
+    } else if (fabEditMode) {
+        fabEditMode.classList.add('hidden');
+        isVisualEditMode = false;
+        document.body.classList.remove('edit-mode-active');
+    }
+}
+// Llamarlo en checkAllDataLoaded o donde se cambien los roles
+const originalApplyRoles = applyRolesAndUI;
+applyRolesAndUI = function() {
+    originalApplyRoles();
+    updateTesterUI();
+}
 
-})();
